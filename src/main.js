@@ -37,7 +37,9 @@ dropzone.addEventListener('drop', (e) => {
   e.preventDefault();
   dropzone.classList.remove('border-indigo-500', 'bg-gray-900');
   const file = e.dataTransfer.files[0];
-  if (file && file.name.endsWith('.pptx')) handleFile(file);
+  if (file && file.name.endsWith('.pptx')) {
+    handleFile(file);
+  }
 });
 
 fileInput.addEventListener('change', () => {
@@ -50,32 +52,53 @@ async function handleFile(file) {
   fileName = file.name;
   showLoading('Reading file...');
 
-  originalBuffer = await file.arrayBuffer();
+  try {
+    originalBuffer = await file.arrayBuffer();
 
-  showLoading('Extracting colors...');
-  const { directColors, themeColorUsage, themeColorMap } = await extractColors(originalBuffer);
-  colorList = buildColorList(directColors, themeColorUsage);
+    showLoading('Extracting colors...');
+    const { directColors, themeColorUsage } = await extractColors(originalBuffer);
+    colorList = buildColorList(directColors, themeColorUsage);
 
-  themeNameToOrigHex = new Map();
-  for (const [name, { hex }] of themeColorUsage) {
-    themeNameToOrigHex.set(name, hex);
+    themeNameToOrigHex = new Map();
+    for (const [name, { hex }] of themeColorUsage) {
+      themeNameToOrigHex.set(name, hex);
+    }
+
+    colorMap = new Map();
+    for (const entry of colorList) {
+      colorMap.set(entry.hex, entry.hex);
+    }
+
+    showLoading('Rendering slides...');
+    originalSlideHtmls = await pptxToHtml(originalBuffer, {
+      width: 960,
+      height: 540,
+      scaleToFit: true,
+    });
+    modifiedSlideHtmls = [...originalSlideHtmls];
+
+    activeTab = 'original';
+    hideLoading();
+    renderUI();
+  } catch (err) {
+    console.error('Failed to process file:', err);
+    hideLoading();
+    dropzone.classList.remove('hidden');
+    showError(`Failed to process file: ${err.message}`);
   }
+}
 
-  colorMap = new Map();
-  for (const entry of colorList) {
-    colorMap.set(entry.hex, entry.hex);
+function showError(msg) {
+  let toast = $('#error-toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = 'error-toast';
+    toast.className = 'fixed bottom-6 left-1/2 -translate-x-1/2 bg-red-900/90 text-red-200 px-6 py-3 rounded-xl shadow-lg z-50 text-sm backdrop-blur';
+    document.body.appendChild(toast);
   }
-
-  showLoading('Rendering slides...');
-  originalSlideHtmls = await pptxToHtml(originalBuffer, {
-    width: 960,
-    height: 540,
-    scaleToFit: true,
-  });
-  modifiedSlideHtmls = [...originalSlideHtmls];
-
-  hideLoading();
-  renderUI();
+  toast.textContent = msg;
+  toast.classList.remove('hidden');
+  setTimeout(() => toast.classList.add('hidden'), 5000);
 }
 
 // --- Loading ---
@@ -106,6 +129,11 @@ function renderColorTable() {
   const container = $('#color-table');
   container.innerHTML = '';
 
+  if (colorList.length === 0) {
+    container.innerHTML = '<div class="px-5 py-8 text-center text-gray-500 text-sm">No colors found in this presentation.</div>';
+    return;
+  }
+
   for (const entry of colorList) {
     const currentHex = colorMap.get(entry.hex) || entry.hex;
     const isModified = currentHex !== entry.hex;
@@ -132,7 +160,7 @@ function renderColorTable() {
         <path stroke-linecap="round" stroke-linejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" />
       </svg>
       <div class="flex items-center gap-2">
-        <div class="color-swatch target-swatch" style="background:#${currentHex}" title="#${currentHex}"></div>
+        <div class="color-swatch target-swatch${isModified ? ' ring-2 ring-indigo-500' : ''}" style="background:#${currentHex}" title="#${currentHex}"></div>
         <div class="flex flex-col items-end">
           <span class="text-xs font-mono text-gray-400 target-hex">#${currentHex}</span>
           <div class="flex items-center gap-1 mt-0.5">
@@ -206,7 +234,7 @@ function renderSlides() {
     wrapper.appendChild(content);
 
     wrapper.addEventListener('click', (e) => {
-      handleSlideClick(e, wrapper);
+      handleSlideClick(e);
     });
 
     container.appendChild(wrapper);
@@ -216,6 +244,9 @@ function renderSlides() {
 function setupTabs() {
   const tabOriginal = $('#tab-original');
   const tabModified = $('#tab-modified');
+
+  tabOriginal.className = 'px-4 py-1.5 rounded-md text-sm font-medium bg-gray-700 text-white transition-colors';
+  tabModified.className = 'px-4 py-1.5 rounded-md text-sm font-medium text-gray-400 hover:text-white transition-colors';
 
   tabOriginal.onclick = () => {
     activeTab = 'original';
@@ -232,8 +263,8 @@ function setupTabs() {
   };
 }
 
-// --- Slide click → color pick ---
-function handleSlideClick(event, slideWrapper) {
+// --- Slide click -> color pick ---
+function handleSlideClick(event) {
   const el = document.elementFromPoint(event.clientX, event.clientY);
   if (!el) return;
 
@@ -241,7 +272,9 @@ function handleSlideClick(event, slideWrapper) {
   if (!color) return;
 
   const hex = rgbToHex(color).toUpperCase();
-  highlightColorRow(hex);
+  if (hex.length === 6) {
+    highlightColorRow(hex);
+  }
 }
 
 function getElementColor(el) {
@@ -250,7 +283,7 @@ function getElementColor(el) {
   if (style.backgroundColor && style.backgroundColor !== 'rgba(0, 0, 0, 0)' && style.backgroundColor !== 'transparent') {
     return style.backgroundColor;
   }
-  if (style.color) {
+  if (style.color && style.color !== 'rgba(0, 0, 0, 0)') {
     return style.color;
   }
   return null;
@@ -270,9 +303,12 @@ function highlightColorRow(clickedHex) {
   let bestDistance = Infinity;
 
   for (const entry of colorList) {
-    const distance = colorDistance(clickedHex, entry.hex);
-    if (distance < bestDistance) {
-      bestDistance = distance;
+    const currentHex = colorMap.get(entry.hex) || entry.hex;
+    const distOrig = colorDistance(clickedHex, entry.hex);
+    const distCurrent = colorDistance(clickedHex, currentHex);
+    const dist = Math.min(distOrig, distCurrent);
+    if (dist < bestDistance) {
+      bestDistance = dist;
       bestMatch = entry;
     }
   }
@@ -287,6 +323,7 @@ function highlightColorRow(clickedHex) {
 }
 
 function colorDistance(hex1, hex2) {
+  if (hex1.length !== 6 || hex2.length !== 6) return Infinity;
   const r1 = parseInt(hex1.substring(0, 2), 16);
   const g1 = parseInt(hex1.substring(2, 4), 16);
   const b1 = parseInt(hex1.substring(4, 6), 16);
@@ -299,27 +336,34 @@ function colorDistance(hex1, hex2) {
 // --- Preview update ---
 function schedulePreviewUpdate() {
   clearTimeout(previewDebounceTimer);
-  previewDebounceTimer = setTimeout(updateModifiedPreview, 300);
+  previewDebounceTimer = setTimeout(updateModifiedPreview, 400);
 }
 
 async function updateModifiedPreview() {
-  const modifiedBuffer = await buildModifiedBuffer(originalBuffer, colorMap, themeNameToOrigHex);
-  modifiedSlideHtmls = await pptxToHtml(modifiedBuffer, {
-    width: 960,
-    height: 540,
-    scaleToFit: true,
-  });
+  try {
+    const modifiedBuffer = await buildModifiedBuffer(originalBuffer, colorMap, themeNameToOrigHex);
+    modifiedSlideHtmls = await pptxToHtml(modifiedBuffer, {
+      width: 960,
+      height: 540,
+      scaleToFit: true,
+    });
 
-  if (activeTab === 'modified') {
-    renderSlides();
+    if (activeTab === 'modified') {
+      renderSlides();
+    }
+  } catch (err) {
+    console.error('Preview update failed:', err);
   }
 }
 
 // --- Download ---
 $('#btn-download').addEventListener('click', async () => {
+  if (!originalBuffer) return;
+
   const btn = $('#btn-download');
+  const originalContent = btn.innerHTML;
   btn.disabled = true;
-  btn.textContent = 'Building...';
+  btn.innerHTML = '<span class="animate-pulse">Building...</span>';
 
   try {
     const blob = await replaceColors(originalBuffer, colorMap, themeNameToOrigHex);
@@ -327,16 +371,16 @@ $('#btn-download').addEventListener('click', async () => {
     const a = document.createElement('a');
     a.href = url;
     a.download = fileName.replace('.pptx', '_recolored.pptx');
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  } catch (err) {
+    console.error('Download failed:', err);
+    showError(`Download failed: ${err.message}`);
   } finally {
     btn.disabled = false;
-    btn.innerHTML = `
-      <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-      </svg>
-      Download Modified .pptx
-    `;
+    btn.innerHTML = originalContent;
   }
 });
 
@@ -349,9 +393,8 @@ $('#btn-reset-all').addEventListener('click', () => {
   schedulePreviewUpdate();
 });
 
-// --- Upload new file ---
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && $('#main-content').classList.contains('hidden') === false) {
-    // Could add reset functionality here
-  }
+// --- Upload new file button ---
+$('#btn-new-file').addEventListener('click', () => {
+  fileInput.value = '';
+  fileInput.click();
 });
