@@ -6,8 +6,8 @@ import { extractImageColors, extractSvgColors } from './imageColors.js';
 import { replaceColors, buildModifiedBuffer } from './colorReplacer.js';
 import { openColorPicker, useEyeDropper } from './colorPicker.js';
 
-const RENDER_WIDTH = 1920;
-const RENDER_HEIGHT = 1080;
+const RENDER_WIDTH = 960;
+const RENDER_HEIGHT = 540;
 const CANVAS_SCALE = 2;
 
 let originalBuffer = null;
