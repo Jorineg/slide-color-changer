@@ -152,12 +152,40 @@ function replaceThemeDefinitions(xml, themeReplacements) {
   return new XMLSerializer().serializeToString(doc);
 }
 
+function hexColorDistance(hex1, hex2) {
+  const r1 = parseInt(hex1.substring(0, 2), 16);
+  const g1 = parseInt(hex1.substring(2, 4), 16);
+  const b1 = parseInt(hex1.substring(4, 6), 16);
+  const r2 = parseInt(hex2.substring(0, 2), 16);
+  const g2 = parseInt(hex2.substring(2, 4), 16);
+  const b2 = parseInt(hex2.substring(4, 6), 16);
+  return Math.sqrt((r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2);
+}
+
+const IMAGE_COLOR_MATCH_THRESHOLD = 45;
+
+function findClosestChangedColor(rawHex, colorMap) {
+  const exact = colorMap.get(rawHex);
+  if (exact && exact !== rawHex) return exact;
+
+  let bestTarget = null;
+  let bestDist = IMAGE_COLOR_MATCH_THRESHOLD;
+  for (const [origHex, newHex] of colorMap) {
+    if (origHex === newHex) continue;
+    const dist = hexColorDistance(rawHex, origHex);
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestTarget = newHex;
+    }
+  }
+  return bestTarget;
+}
+
 function hasActiveImageReplacements(colorMap, imageColorMap) {
   if (!imageColorMap) return false;
   for (const [, colors] of imageColorMap) {
     for (const { hex } of colors) {
-      const target = colorMap.get(hex);
-      if (target && target !== hex) return true;
+      if (findClosestChangedColor(hex, colorMap)) return true;
     }
   }
   return false;
@@ -166,30 +194,24 @@ function hasActiveImageReplacements(colorMap, imageColorMap) {
 async function applyToImages(zip, colorMap, imageColorMap) {
   if (!imageColorMap || imageColorMap.size === 0) return;
 
-  // Build replacement map for image colors only
-  const imageReplacements = new Map();
-  for (const [, colors] of imageColorMap) {
-    for (const { hex } of colors) {
-      const target = colorMap.get(hex);
-      if (target && target !== hex && !imageReplacements.has(hex)) {
-        imageReplacements.set(hex, target);
-      }
-    }
-  }
-  if (imageReplacements.size === 0) return;
+  const imagesToProcess = [];
 
-  // Find all image files that need recoloring
-  const pathsToRecolor = new Set();
   for (const [path, colors] of imageColorMap) {
+    const replacements = new Map();
     for (const { hex } of colors) {
-      if (imageReplacements.has(hex)) {
-        pathsToRecolor.add(path);
-        break;
+      const target = findClosestChangedColor(hex, colorMap);
+      if (target) {
+        replacements.set(hex, target);
       }
+    }
+    if (replacements.size > 0) {
+      imagesToProcess.push({ path, replacements });
     }
   }
 
-  for (const path of pathsToRecolor) {
+  if (imagesToProcess.length === 0) return;
+
+  for (const { path, replacements } of imagesToProcess) {
     const file = zip.file(path);
     if (!file) continue;
 
@@ -199,7 +221,7 @@ async function applyToImages(zip, colorMap, imageColorMap) {
       : ext === 'gif' ? 'image/gif'
       : 'image/jpeg';
 
-    const recolored = await recolorImage(bytes, mime, imageReplacements);
+    const recolored = await recolorImage(bytes, mime, replacements);
     if (recolored) {
       zip.file(path, recolored);
     }

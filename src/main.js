@@ -140,14 +140,14 @@ function renderColorTable() {
     const isModified = currentHex !== entry.hex;
 
     const row = document.createElement('div');
-    row.className = 'color-row flex items-center gap-2 px-3 py-2';
+    row.className = 'color-row grid grid-cols-[1.75rem_1fr_0.75rem_1.75rem_1fr] items-center gap-x-2 px-3 py-2';
     row.dataset.colorId = entry.id;
     row.dataset.origHex = entry.hex;
 
     row.innerHTML = `
       <div class="color-swatch original-swatch" style="background:#${entry.hex}" title="#${entry.hex}"></div>
-      <div class="flex flex-col min-w-0 flex-1">
-        <span class="text-[0.65rem] font-mono text-gray-400 leading-tight">#${entry.hex}</span>
+      <div class="min-w-0">
+        <div class="text-[0.65rem] font-mono text-gray-400 leading-tight truncate">#${entry.hex}</div>
         <div class="flex items-center gap-1">
           <span class="badge ${entry.type === 'theme' ? 'badge-theme' : entry.type === 'image' ? 'badge-image' : 'badge-direct'}">
             ${entry.type === 'theme' ? entry.themeLabel : entry.type === 'image' ? 'Image' : 'Direct'}
@@ -155,12 +155,12 @@ function renderColorTable() {
           <span class="text-[0.6rem] text-gray-600">${entry.count}x</span>
         </div>
       </div>
-      <svg class="arrow-icon h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+      <svg class="arrow-icon h-3 w-3 justify-self-center" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
         <path stroke-linecap="round" stroke-linejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" />
       </svg>
       <div class="color-swatch target-swatch${isModified ? ' ring-2 ring-indigo-500' : ''}" style="background:#${currentHex}" title="#${currentHex}"></div>
-      <div class="flex flex-col items-end min-w-0">
-        <span class="text-[0.65rem] font-mono text-gray-400 leading-tight target-hex">#${currentHex}</span>
+      <div class="min-w-0">
+        <div class="text-[0.65rem] font-mono text-gray-400 leading-tight truncate target-hex">#${currentHex}</div>
         <div class="flex items-center gap-1">
           ${isModified ? `<button class="reset-btn text-[0.6rem] text-indigo-400 hover:text-indigo-300 cursor-pointer leading-tight">Reset</button>` : ''}
           ${'EyeDropper' in window ? `<button class="eyedropper-btn text-gray-500 hover:text-gray-300 cursor-pointer leading-tight" title="Pick from screen">

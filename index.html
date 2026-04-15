@@ -6,19 +6,19 @@
     <title>Slide Color Changer</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎨</text></svg>">
   </head>
-  <body class="bg-gray-950 text-gray-100 min-h-screen overflow-x-hidden">
-    <div id="app" class="max-w-7xl mx-auto px-4 py-8 overflow-x-hidden">
+  <body class="bg-gray-950 text-gray-100 h-screen flex flex-col overflow-hidden">
+    <div id="app" class="flex flex-col h-full">
 
       <!-- Header -->
-      <header class="text-center mb-8">
+      <header class="text-center py-4 px-4 shrink-0">
         <h1 class="text-3xl font-bold text-white">Slide Color Changer</h1>
         <p class="text-gray-400 mt-1">Upload a .pptx, remap colors, download the result. Fully in-browser, fully private.</p>
       </header>
 
       <!-- Drop Zone -->
       <div id="dropzone"
-        class="border-2 border-dashed border-gray-600 rounded-2xl p-12 text-center cursor-pointer
-               hover:border-indigo-500 hover:bg-gray-900 transition-colors duration-200 mb-8"
+        class="mx-auto w-full max-w-3xl border-2 border-dashed border-gray-600 rounded-2xl p-12 text-center cursor-pointer
+               hover:border-indigo-500 hover:bg-gray-900 transition-colors duration-200"
         role="button" tabindex="0">
         <input type="file" id="file-input" accept=".pptx" class="hidden" />
         <div class="space-y-3">
@@ -37,11 +37,11 @@
       </div>
 
       <!-- Main content (hidden until file loaded) -->
-      <div id="main-content" class="hidden">
+      <div id="main-content" class="hidden flex flex-col flex-1 min-h-0">
 
-        <!-- Sticky toolbar -->
-        <div id="toolbar" class="sticky top-0 z-20 bg-gray-950/95 backdrop-blur-sm -mx-4 px-4 py-3 mb-4 border-b border-gray-800/50">
-          <div class="flex flex-wrap items-center justify-between gap-3">
+        <!-- Toolbar (fixed, non-scrolling) -->
+        <div id="toolbar" class="shrink-0 z-20 bg-gray-950/95 backdrop-blur-sm px-4 py-3 border-b border-gray-800/50">
+          <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
             <div class="flex items-center gap-3 min-w-0">
               <h2 class="text-lg font-semibold truncate" id="file-name"></h2>
               <span class="text-sm text-gray-500 shrink-0" id="slide-count"></span>
@@ -66,27 +66,32 @@
           </div>
         </div>
 
-        <!-- Two-column layout -->
-        <div class="grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-6 items-start">
+        <!-- Scrollable content area -->
+        <div id="scroll-area" class="flex-1 overflow-y-auto min-h-0">
+          <div class="max-w-7xl mx-auto px-4 py-4">
+            <!-- Two-column layout -->
+            <div class="grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-6 items-start">
 
-          <!-- Left: Slide previews -->
-          <div id="slides-container" class="space-y-4 min-w-0">
-            <!-- Slides rendered here -->
-          </div>
+              <!-- Left: Slide previews -->
+              <div id="slides-container" class="space-y-4 min-w-0">
+                <!-- Slides rendered here -->
+              </div>
 
-          <!-- Right: Color table -->
-          <div class="lg:sticky lg:top-16 lg:self-start lg:max-h-[calc(100vh-5rem)] flex flex-col">
-            <div class="bg-gray-900 rounded-2xl border border-gray-800 overflow-hidden flex flex-col max-h-[inherit]">
-              <div class="px-4 py-3 border-b border-gray-800 shrink-0">
-                <h3 class="font-semibold">Color Map</h3>
-                <p class="text-xs text-gray-500 mt-0.5">Click a slide to pick colors. Click a swatch to change it.</p>
+              <!-- Right: Color table -->
+              <div class="lg:sticky lg:top-4 lg:self-start lg:max-h-[calc(100vh-9rem)] flex flex-col">
+                <div class="bg-gray-900 rounded-2xl border border-gray-800 overflow-hidden flex flex-col max-h-[inherit]">
+                  <div class="px-4 py-3 border-b border-gray-800 shrink-0">
+                    <h3 class="font-semibold">Color Map</h3>
+                    <p class="text-xs text-gray-500 mt-0.5">Click a slide to pick colors. Click a swatch to change it.</p>
+                  </div>
+                  <div id="color-table" class="divide-y divide-gray-800 overflow-y-auto">
+                    <!-- Color rows rendered here -->
+                  </div>
+                </div>
               </div>
-              <div id="color-table" class="divide-y divide-gray-800 overflow-y-auto">
-                <!-- Color rows rendered here -->
-              </div>
+
             </div>
           </div>
-
         </div>
       </div>
     </div>
