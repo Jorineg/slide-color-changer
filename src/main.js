@@ -236,23 +236,54 @@ function renderColorTable() {
   }
 }
 
+const SLIDE_FONTS_CSS = `@import url('https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&family=Caladea:ital,wght@0,400;0,700;1,400;1,700&family=Lato:ital,wght@0,400;0,700;1,400;1,700&display=swap');`;
+
+const SLIDE_HARDENING_CSS = `
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    margin: 0;
+    font-family: 'Carlito', 'Calibri', 'Lato', 'Arial', 'Helvetica Neue', sans-serif;
+    line-height: 1.15;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    background: #ffffff;
+    overflow: hidden;
+  }
+  img { object-fit: contain; image-rendering: auto; }
+  span, p, div { word-break: break-word; overflow-wrap: break-word; }
+  table { border-collapse: collapse; }
+  svg { overflow: visible; }
+`;
+
+function createIsolatedFrame() {
+  const iframe = document.createElement('iframe');
+  iframe.style.cssText = `position:fixed;left:-9999px;top:0;width:${RENDER_WIDTH}px;height:${RENDER_HEIGHT}px;border:none;visibility:hidden;`;
+  document.body.appendChild(iframe);
+  return iframe;
+}
+
 async function rasterizeSlide(html) {
-  const stage = document.createElement('div');
-  stage.className = 'slide-render-stage';
-  stage.style.width = `${RENDER_WIDTH}px`;
-  stage.style.height = `${RENDER_HEIGHT}px`;
+  const iframe = createIsolatedFrame();
+  const doc = iframe.contentDocument;
 
-  const content = document.createElement('div');
-  content.className = 'slide-html-content';
-  content.innerHTML = html;
-  stage.appendChild(content);
+  doc.open();
+  doc.write(`<!DOCTYPE html><html><head>
+    <style>${SLIDE_FONTS_CSS}</style>
+    <style>${SLIDE_HARDENING_CSS}</style>
+  </head><body>${html}</body></html>`);
+  doc.close();
 
-  document.body.appendChild(stage);
+  await new Promise((r) => {
+    if (iframe.contentWindow.document.fonts) {
+      iframe.contentWindow.document.fonts.ready.then(r);
+    } else {
+      r();
+    }
+  });
+  await new Promise((r) => setTimeout(r, 100));
 
-  await document.fonts.ready;
-  await new Promise((r) => setTimeout(r, 50));
-
-  const canvas = await html2canvas(stage, {
+  const canvas = await html2canvas(doc.body, {
     width: RENDER_WIDTH,
     height: RENDER_HEIGHT,
     scale: CANVAS_SCALE,
@@ -260,9 +291,11 @@ async function rasterizeSlide(html) {
     allowTaint: true,
     backgroundColor: '#ffffff',
     logging: false,
+    windowWidth: RENDER_WIDTH,
+    windowHeight: RENDER_HEIGHT,
   });
 
-  document.body.removeChild(stage);
+  document.body.removeChild(iframe);
   return canvas;
 }
 

@@ -30,50 +30,6 @@
   border-radius: 0.75rem;
 }
 
-/* Offscreen staging area for html2canvas */
-.slide-render-stage {
-  position: absolute;
-  left: -9999px;
-  top: 0;
-  pointer-events: none;
-  opacity: 0;
-}
-
-/* CSS hardening for pptx-to-html output in the staging area */
-.slide-render-stage .slide-html-content {
-  position: relative;
-  overflow: hidden;
-  font-family: 'Carlito', 'Calibri', 'Lato', 'Arial', 'Helvetica Neue', sans-serif;
-  line-height: 1.15;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  text-rendering: optimizeLegibility;
-}
-
-.slide-render-stage .slide-html-content * {
-  box-sizing: border-box;
-}
-
-.slide-render-stage .slide-html-content img {
-  object-fit: contain;
-  max-width: none;
-  image-rendering: auto;
-}
-
-.slide-render-stage .slide-html-content span,
-.slide-render-stage .slide-html-content p,
-.slide-render-stage .slide-html-content div {
-  word-break: break-word;
-  overflow-wrap: break-word;
-}
-
-.slide-render-stage .slide-html-content table {
-  border-collapse: collapse;
-}
-
-.slide-render-stage .slide-html-content svg {
-  overflow: visible;
-}
 
 .slide-placeholder {
   width: 100%;
