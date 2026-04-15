@@ -1,6 +1,7 @@
 import './style.css';
 import { pptxToHtml } from '@jvmr/pptx-to-html';
 import { extractColors, buildColorList } from './colorExtractor.js';
+import { extractImageColors } from './imageColors.js';
 import { replaceColors, buildModifiedBuffer } from './colorReplacer.js';
 import { openColorPicker, useEyeDropper } from './colorPicker.js';
 
@@ -9,6 +10,7 @@ let fileName = '';
 let colorList = [];
 let colorMap = new Map();
 let themeNameToOrigHex = new Map();
+let imageColorMap = new Map();
 let slideHtmls = [];
 let previewDebounceTimer = null;
 
@@ -55,7 +57,11 @@ async function handleFile(file) {
 
     showLoading('Extracting colors...');
     const { directColors, themeColorUsage } = await extractColors(originalBuffer);
-    colorList = buildColorList(directColors, themeColorUsage);
+
+    showLoading('Scanning images...');
+    imageColorMap = await extractImageColors(originalBuffer);
+
+    colorList = buildColorList(directColors, themeColorUsage, imageColorMap);
 
     themeNameToOrigHex = new Map();
     for (const [name, { hex }] of themeColorUsage) {
@@ -143,8 +149,8 @@ function renderColorTable() {
       <div class="flex flex-col min-w-0 flex-1">
         <span class="text-[0.65rem] font-mono text-gray-400 leading-tight">#${entry.hex}</span>
         <div class="flex items-center gap-1">
-          <span class="badge ${entry.type === 'theme' ? 'badge-theme' : 'badge-direct'}">
-            ${entry.type === 'theme' ? entry.themeLabel : 'Direct'}
+          <span class="badge ${entry.type === 'theme' ? 'badge-theme' : entry.type === 'image' ? 'badge-image' : 'badge-direct'}">
+            ${entry.type === 'theme' ? entry.themeLabel : entry.type === 'image' ? 'Image' : 'Direct'}
           </span>
           <span class="text-[0.6rem] text-gray-600">${entry.count}x</span>
         </div>
@@ -308,7 +314,7 @@ function schedulePreviewUpdate() {
 
 async function updateModifiedPreview() {
   try {
-    const modifiedBuffer = await buildModifiedBuffer(originalBuffer, colorMap, themeNameToOrigHex);
+    const modifiedBuffer = await buildModifiedBuffer(originalBuffer, colorMap, themeNameToOrigHex, imageColorMap);
     slideHtmls = await pptxToHtml(modifiedBuffer, {
       width: 960,
       height: 540,
@@ -330,7 +336,7 @@ $('#btn-download').addEventListener('click', async () => {
   btn.innerHTML = '<span class="animate-pulse">Building...</span>';
 
   try {
-    const blob = await replaceColors(originalBuffer, colorMap, themeNameToOrigHex);
+    const blob = await replaceColors(originalBuffer, colorMap, themeNameToOrigHex, imageColorMap);
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;

@@ -91,6 +91,10 @@
   background: rgba(59, 130, 246, 0.15);
   color: #93c5fd;
 }
+.badge-image {
+  background: rgba(236, 172, 65, 0.15);
+  color: #f0b849;
+}
 
 .pcr-app {
   z-index: 50;

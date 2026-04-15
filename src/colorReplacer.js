@@ -1,14 +1,16 @@
 import JSZip from 'jszip';
+import { recolorImage } from './imageColors.js';
 
 /**
  * Apply color replacements to the PPTX and return a new Blob.
  */
-export async function replaceColors(originalBuffer, colorMap, themeNameToOrigHex) {
+export async function replaceColors(originalBuffer, colorMap, themeNameToOrigHex, imageColorMap) {
   const zip = await JSZip.loadAsync(originalBuffer);
   const { directReplacements, themeReplacements } = buildReplacementMaps(colorMap, themeNameToOrigHex);
 
   await applyToSlideFiles(zip, directReplacements, themeReplacements);
   await applyToThemeFiles(zip, themeReplacements);
+  await applyToImages(zip, colorMap, imageColorMap);
 
   return zip.generateAsync({
     type: 'blob',
@@ -19,16 +21,18 @@ export async function replaceColors(originalBuffer, colorMap, themeNameToOrigHex
 /**
  * Build a modified PPTX as ArrayBuffer for re-rendering preview.
  */
-export async function buildModifiedBuffer(originalBuffer, colorMap, themeNameToOrigHex) {
+export async function buildModifiedBuffer(originalBuffer, colorMap, themeNameToOrigHex, imageColorMap) {
   const { directReplacements, themeReplacements } = buildReplacementMaps(colorMap, themeNameToOrigHex);
+  const hasImageChanges = imageColorMap && hasActiveImageReplacements(colorMap, imageColorMap);
 
-  if (directReplacements.size === 0 && themeReplacements.size === 0) {
+  if (directReplacements.size === 0 && themeReplacements.size === 0 && !hasImageChanges) {
     return originalBuffer;
   }
 
   const zip = await JSZip.loadAsync(originalBuffer);
   await applyToSlideFiles(zip, directReplacements, themeReplacements);
   await applyToThemeFiles(zip, themeReplacements);
+  await applyToImages(zip, colorMap, imageColorMap);
 
   return zip.generateAsync({ type: 'arraybuffer' });
 }
@@ -146,4 +150,58 @@ function replaceThemeDefinitions(xml, themeReplacements) {
 
   if (!changed) return xml;
   return new XMLSerializer().serializeToString(doc);
+}
+
+function hasActiveImageReplacements(colorMap, imageColorMap) {
+  if (!imageColorMap) return false;
+  for (const [, colors] of imageColorMap) {
+    for (const { hex } of colors) {
+      const target = colorMap.get(hex);
+      if (target && target !== hex) return true;
+    }
+  }
+  return false;
+}
+
+async function applyToImages(zip, colorMap, imageColorMap) {
+  if (!imageColorMap || imageColorMap.size === 0) return;
+
+  // Build replacement map for image colors only
+  const imageReplacements = new Map();
+  for (const [, colors] of imageColorMap) {
+    for (const { hex } of colors) {
+      const target = colorMap.get(hex);
+      if (target && target !== hex && !imageReplacements.has(hex)) {
+        imageReplacements.set(hex, target);
+      }
+    }
+  }
+  if (imageReplacements.size === 0) return;
+
+  // Find all image files that need recoloring
+  const pathsToRecolor = new Set();
+  for (const [path, colors] of imageColorMap) {
+    for (const { hex } of colors) {
+      if (imageReplacements.has(hex)) {
+        pathsToRecolor.add(path);
+        break;
+      }
+    }
+  }
+
+  for (const path of pathsToRecolor) {
+    const file = zip.file(path);
+    if (!file) continue;
+
+    const bytes = await file.async('uint8array');
+    const ext = path.split('.').pop().toLowerCase();
+    const mime = ext === 'png' ? 'image/png'
+      : ext === 'gif' ? 'image/gif'
+      : 'image/jpeg';
+
+    const recolored = await recolorImage(bytes, mime, imageReplacements);
+    if (recolored) {
+      zip.file(path, recolored);
+    }
+  }
 }

@@ -147,9 +147,13 @@ export async function extractColors(zipOrBuffer) {
 
 /**
  * Build a unified sorted color list for the UI.
- * Each entry: { id, hex, count, type: 'theme'|'direct', themeName?, themeLabel? }
+ * Each entry: { id, hex, count, type: 'theme'|'direct'|'image', themeName?, themeLabel?, imagePaths? }
+ *
+ * @param {Map} directColors
+ * @param {Map} themeColorUsage
+ * @param {Map} [imageColorMap] - Optional map from extractImageColors()
  */
-export function buildColorList(directColors, themeColorUsage) {
+export function buildColorList(directColors, themeColorUsage, imageColorMap) {
   const list = [];
 
   const themeHexSet = new Set([...themeColorUsage.values()].map(t => t.hex));
@@ -172,6 +176,75 @@ export function buildColorList(directColors, themeColorUsage) {
     });
   }
 
+  // Add image-derived colors, grouping similar hues across images
+  if (imageColorMap && imageColorMap.size > 0) {
+    const imageGroups = groupImageColors(imageColorMap, list);
+    for (const group of imageGroups) {
+      list.push({
+        id: `image-${group.hex}`,
+        hex: group.hex,
+        count: group.imageCount,
+        type: 'image',
+        imagePaths: group.paths,
+      });
+    }
+  }
+
   list.sort((a, b) => b.count - a.count);
   return list;
+}
+
+/**
+ * Group image colors that match existing XML colors, and add novel ones.
+ * Avoids duplicating colors already present from XML extraction.
+ */
+function groupImageColors(imageColorMap, existingList) {
+  const existingHexes = new Set(existingList.map(e => e.hex));
+  const groups = new Map();
+
+  for (const [path, colors] of imageColorMap) {
+    for (const { hex } of colors) {
+      // Skip if this exact color is already in the XML color list
+      if (existingHexes.has(hex)) continue;
+
+      // Check if a very similar color already exists (distance < 40)
+      let matchedHex = null;
+      for (const existing of existingHexes) {
+        if (hexColorDistance(hex, existing) < 40) {
+          matchedHex = existing;
+          break;
+        }
+      }
+      if (matchedHex) continue;
+
+      // Check against already-grouped image colors
+      let groupKey = hex;
+      for (const [key] of groups) {
+        if (hexColorDistance(hex, key) < 40) {
+          groupKey = key;
+          break;
+        }
+      }
+
+      if (groups.has(groupKey)) {
+        const g = groups.get(groupKey);
+        if (!g.paths.includes(path)) g.paths.push(path);
+        g.imageCount++;
+      } else {
+        groups.set(groupKey, { hex: groupKey, paths: [path], imageCount: 1 });
+      }
+    }
+  }
+
+  return [...groups.values()];
+}
+
+function hexColorDistance(hex1, hex2) {
+  const r1 = parseInt(hex1.substring(0, 2), 16);
+  const g1 = parseInt(hex1.substring(2, 4), 16);
+  const b1 = parseInt(hex1.substring(4, 6), 16);
+  const r2 = parseInt(hex2.substring(0, 2), 16);
+  const g2 = parseInt(hex2.substring(2, 4), 16);
+  const b2 = parseInt(hex2.substring(4, 6), 16);
+  return Math.sqrt((r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2);
 }
