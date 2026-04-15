@@ -277,4 +277,71 @@ export async function recolorImage(imageBytes, mime, colorReplacements) {
   return new Uint8Array(await blob.arrayBuffer());
 }
 
+const SVG_SATURATION_THRESHOLD = 10;
+
+function findSvgColors(svgContent) {
+  const hexPattern = /#([0-9a-fA-F]{6})\b/g;
+  const colorCounts = new Map();
+
+  let match;
+  while ((match = hexPattern.exec(svgContent)) !== null) {
+    const hex = match[1].toUpperCase();
+    const [r, g, b] = hexToRgb(hex);
+    const [, s] = rgbToHsv(r, g, b);
+    if (s < SVG_SATURATION_THRESHOLD) continue;
+    colorCounts.set(hex, (colorCounts.get(hex) || 0) + 1);
+  }
+
+  return [...colorCounts.entries()].map(([hex, count]) => ({ hex, count }));
+}
+
+/**
+ * Scan all SVG files in ppt/media/ and extract hex colors.
+ * Returns a Map of svgPath -> [{ hex, count }]
+ */
+export async function extractSvgColors(zipOrBuffer) {
+  const zip = zipOrBuffer instanceof JSZip
+    ? zipOrBuffer
+    : await JSZip.loadAsync(zipOrBuffer);
+
+  const svgFiles = zip.file(/ppt\/media\/.*\.svg$/i);
+  const svgColorMap = new Map();
+
+  for (const file of svgFiles) {
+    try {
+      const content = await file.async('string');
+      const colors = findSvgColors(content);
+      if (colors.length > 0) {
+        svgColorMap.set(file.name, colors);
+      }
+    } catch {
+      // Skip SVGs that fail to read
+    }
+  }
+
+  return svgColorMap;
+}
+
+/**
+ * Replace hex colors inside an SVG string.
+ * @param {string} svgContent - Original SVG markup
+ * @param {Map<string, string>} colorReplacements - origHex -> newHex (uppercase, no #)
+ * @returns {string|null} Modified SVG, or null if unchanged
+ */
+export function recolorSvg(svgContent, colorReplacements) {
+  let modified = svgContent;
+  let changed = false;
+
+  for (const [origHex, newHex] of colorReplacements) {
+    const pattern = new RegExp(`#${origHex}`, 'gi');
+    const result = modified.replace(pattern, `#${newHex}`);
+    if (result !== modified) {
+      modified = result;
+      changed = true;
+    }
+  }
+
+  return changed ? modified : null;
+}
+
 export { rgbToHsv, hsvToRgb, hexToRgb, rgbToHex };

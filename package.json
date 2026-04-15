@@ -17,6 +17,7 @@
     "@jvmr/pptx-to-html": "^1.0.1",
     "@simonwep/pickr": "^1.9.1",
     "@tailwindcss/vite": "^4.2.2",
+    "html2canvas": "^1.4.1",
     "jszip": "^3.10.1",
     "tailwindcss": "^4.2.2"
   }

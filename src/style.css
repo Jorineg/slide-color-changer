@@ -1,3 +1,5 @@
+/* Metrically-compatible open-source substitutes for common PPTX fonts */
+@import url('https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&family=Caladea:ital,wght@0,400;0,700;1,400;1,700&family=Lato:ital,wght@0,400;0,700;1,400;1,700&display=swap');
 @import "tailwindcss";
 
 @theme {
@@ -22,13 +24,77 @@
   box-shadow: 0 0 0 1px rgba(255,255,255,0.05), 0 4px 24px rgba(0,0,0,0.4);
 }
 
-.slide-wrapper .slide-html-content {
+.slide-canvas-content {
   width: 100%;
-  overflow: hidden;
+  display: block;
+  border-radius: 0.75rem;
 }
 
-.slide-wrapper .slide-html-content > div {
-  transform-origin: top left;
+/* Offscreen staging area for html2canvas */
+.slide-render-stage {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  pointer-events: none;
+  opacity: 0;
+}
+
+/* CSS hardening for pptx-to-html output in the staging area */
+.slide-render-stage .slide-html-content {
+  position: relative;
+  overflow: hidden;
+  font-family: 'Carlito', 'Calibri', 'Lato', 'Arial', 'Helvetica Neue', sans-serif;
+  line-height: 1.15;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+.slide-render-stage .slide-html-content * {
+  box-sizing: border-box;
+}
+
+.slide-render-stage .slide-html-content img {
+  object-fit: contain;
+  max-width: none;
+  image-rendering: auto;
+}
+
+.slide-render-stage .slide-html-content span,
+.slide-render-stage .slide-html-content p,
+.slide-render-stage .slide-html-content div {
+  word-break: break-word;
+  overflow-wrap: break-word;
+}
+
+.slide-render-stage .slide-html-content table {
+  border-collapse: collapse;
+}
+
+.slide-render-stage .slide-html-content svg {
+  overflow: visible;
+}
+
+.slide-placeholder {
+  width: 100%;
+  aspect-ratio: 16/9;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f8f8fa;
+}
+
+.slide-placeholder .spinner {
+  width: 2rem;
+  height: 2rem;
+  border: 3px solid #e5e7eb;
+  border-top-color: #6366f1;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 .slide-label {
@@ -94,6 +160,10 @@
 .badge-image {
   background: rgba(236, 172, 65, 0.15);
   color: #f0b849;
+}
+.badge-svg {
+  background: rgba(16, 185, 129, 0.15);
+  color: #6ee7b7;
 }
 
 .pcr-app {

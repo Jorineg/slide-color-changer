@@ -1,16 +1,17 @@
 import JSZip from 'jszip';
-import { recolorImage } from './imageColors.js';
+import { recolorImage, recolorSvg } from './imageColors.js';
 
 /**
  * Apply color replacements to the PPTX and return a new Blob.
  */
-export async function replaceColors(originalBuffer, colorMap, themeNameToOrigHex, imageColorMap) {
+export async function replaceColors(originalBuffer, colorMap, themeNameToOrigHex, imageColorMap, svgColorMap) {
   const zip = await JSZip.loadAsync(originalBuffer);
   const { directReplacements, themeReplacements } = buildReplacementMaps(colorMap, themeNameToOrigHex);
 
   await applyToSlideFiles(zip, directReplacements, themeReplacements);
   await applyToThemeFiles(zip, themeReplacements);
   await applyToImages(zip, colorMap, imageColorMap);
+  await applyToSvgs(zip, colorMap, svgColorMap);
 
   return zip.generateAsync({
     type: 'blob',
@@ -21,11 +22,12 @@ export async function replaceColors(originalBuffer, colorMap, themeNameToOrigHex
 /**
  * Build a modified PPTX as ArrayBuffer for re-rendering preview.
  */
-export async function buildModifiedBuffer(originalBuffer, colorMap, themeNameToOrigHex, imageColorMap) {
+export async function buildModifiedBuffer(originalBuffer, colorMap, themeNameToOrigHex, imageColorMap, svgColorMap) {
   const { directReplacements, themeReplacements } = buildReplacementMaps(colorMap, themeNameToOrigHex);
   const hasImageChanges = imageColorMap && hasActiveImageReplacements(colorMap, imageColorMap);
+  const hasSvgChanges = svgColorMap && hasActiveSvgReplacements(colorMap, svgColorMap);
 
-  if (directReplacements.size === 0 && themeReplacements.size === 0 && !hasImageChanges) {
+  if (directReplacements.size === 0 && themeReplacements.size === 0 && !hasImageChanges && !hasSvgChanges) {
     return originalBuffer;
   }
 
@@ -33,6 +35,7 @@ export async function buildModifiedBuffer(originalBuffer, colorMap, themeNameToO
   await applyToSlideFiles(zip, directReplacements, themeReplacements);
   await applyToThemeFiles(zip, themeReplacements);
   await applyToImages(zip, colorMap, imageColorMap);
+  await applyToSvgs(zip, colorMap, svgColorMap);
 
   return zip.generateAsync({ type: 'arraybuffer' });
 }
@@ -222,6 +225,40 @@ async function applyToImages(zip, colorMap, imageColorMap) {
       : 'image/jpeg';
 
     const recolored = await recolorImage(bytes, mime, replacements);
+    if (recolored) {
+      zip.file(path, recolored);
+    }
+  }
+}
+
+function hasActiveSvgReplacements(colorMap, svgColorMap) {
+  if (!svgColorMap) return false;
+  for (const [, colors] of svgColorMap) {
+    for (const { hex } of colors) {
+      if (findClosestChangedColor(hex, colorMap)) return true;
+    }
+  }
+  return false;
+}
+
+async function applyToSvgs(zip, colorMap, svgColorMap) {
+  if (!svgColorMap || svgColorMap.size === 0) return;
+
+  for (const [path, colors] of svgColorMap) {
+    const replacements = new Map();
+    for (const { hex } of colors) {
+      const target = findClosestChangedColor(hex, colorMap);
+      if (target) {
+        replacements.set(hex, target);
+      }
+    }
+    if (replacements.size === 0) continue;
+
+    const file = zip.file(path);
+    if (!file) continue;
+
+    const svgContent = await file.async('string');
+    const recolored = recolorSvg(svgContent, replacements);
     if (recolored) {
       zip.file(path, recolored);
     }

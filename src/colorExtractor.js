@@ -147,13 +147,13 @@ export async function extractColors(zipOrBuffer) {
 
 /**
  * Build a unified sorted color list for the UI.
- * Each entry: { id, hex, count, type: 'theme'|'direct'|'image', themeName?, themeLabel?, imagePaths? }
  *
  * @param {Map} directColors
  * @param {Map} themeColorUsage
  * @param {Map} [imageColorMap] - Optional map from extractImageColors()
+ * @param {Map} [svgColorMap] - Optional map from extractSvgColors()
  */
-export function buildColorList(directColors, themeColorUsage, imageColorMap) {
+export function buildColorList(directColors, themeColorUsage, imageColorMap, svgColorMap) {
   const list = [];
 
   const themeHexSet = new Set([...themeColorUsage.values()].map(t => t.hex));
@@ -178,7 +178,7 @@ export function buildColorList(directColors, themeColorUsage, imageColorMap) {
 
   // Add image-derived colors, grouping similar hues across images
   if (imageColorMap && imageColorMap.size > 0) {
-    const imageGroups = groupImageColors(imageColorMap, list);
+    const imageGroups = groupImageColors(imageColorMap);
     for (const group of imageGroups) {
       list.push({
         id: `image-${group.hex}`,
@@ -186,6 +186,20 @@ export function buildColorList(directColors, themeColorUsage, imageColorMap) {
         count: group.imageCount,
         type: 'image',
         imagePaths: group.paths,
+      });
+    }
+  }
+
+  // Add SVG-derived colors
+  if (svgColorMap && svgColorMap.size > 0) {
+    const svgGroups = groupSvgColors(svgColorMap, list);
+    for (const group of svgGroups) {
+      list.push({
+        id: `svg-${group.hex}`,
+        hex: group.hex,
+        count: group.totalCount,
+        type: 'svg',
+        svgPaths: group.paths,
       });
     }
   }
@@ -198,26 +212,11 @@ export function buildColorList(directColors, themeColorUsage, imageColorMap) {
  * Group image colors that match existing XML colors, and add novel ones.
  * Avoids duplicating colors already present from XML extraction.
  */
-function groupImageColors(imageColorMap, existingList) {
-  const existingHexes = new Set(existingList.map(e => e.hex));
+function groupImageColors(imageColorMap) {
   const groups = new Map();
 
   for (const [path, colors] of imageColorMap) {
     for (const { hex } of colors) {
-      // Skip if this exact color is already in the XML color list
-      if (existingHexes.has(hex)) continue;
-
-      // Check if a very similar color already exists (distance < 40)
-      let matchedHex = null;
-      for (const existing of existingHexes) {
-        if (hexColorDistance(hex, existing) < 40) {
-          matchedHex = existing;
-          break;
-        }
-      }
-      if (matchedHex) continue;
-
-      // Check against already-grouped image colors
       let groupKey = hex;
       for (const [key] of groups) {
         if (hexColorDistance(hex, key) < 40) {
@@ -232,6 +231,47 @@ function groupImageColors(imageColorMap, existingList) {
         g.imageCount++;
       } else {
         groups.set(groupKey, { hex: groupKey, paths: [path], imageCount: 1 });
+      }
+    }
+  }
+
+  return [...groups.values()];
+}
+
+/**
+ * Group SVG colors, deduplicating against existing list entries and across files.
+ */
+function groupSvgColors(svgColorMap, existingList) {
+  const existingHexes = new Set(existingList.map(e => e.hex));
+  const groups = new Map();
+
+  for (const [path, colors] of svgColorMap) {
+    for (const { hex, count } of colors) {
+      if (existingHexes.has(hex)) continue;
+
+      let matchedHex = null;
+      for (const existing of existingHexes) {
+        if (hexColorDistance(hex, existing) < 40) {
+          matchedHex = existing;
+          break;
+        }
+      }
+      if (matchedHex) continue;
+
+      let groupKey = hex;
+      for (const [key] of groups) {
+        if (hexColorDistance(hex, key) < 40) {
+          groupKey = key;
+          break;
+        }
+      }
+
+      if (groups.has(groupKey)) {
+        const g = groups.get(groupKey);
+        if (!g.paths.includes(path)) g.paths.push(path);
+        g.totalCount += count;
+      } else {
+        groups.set(groupKey, { hex: groupKey, paths: [path], totalCount: count });
       }
     }
   }

@@ -1,9 +1,14 @@
 import './style.css';
 import { pptxToHtml } from '@jvmr/pptx-to-html';
+import html2canvas from 'html2canvas';
 import { extractColors, buildColorList } from './colorExtractor.js';
-import { extractImageColors } from './imageColors.js';
+import { extractImageColors, extractSvgColors } from './imageColors.js';
 import { replaceColors, buildModifiedBuffer } from './colorReplacer.js';
 import { openColorPicker, useEyeDropper } from './colorPicker.js';
+
+const RENDER_WIDTH = 1920;
+const RENDER_HEIGHT = 1080;
+const CANVAS_SCALE = 2;
 
 let originalBuffer = null;
 let fileName = '';
@@ -11,7 +16,11 @@ let colorList = [];
 let colorMap = new Map();
 let themeNameToOrigHex = new Map();
 let imageColorMap = new Map();
+let svgColorMap = new Map();
+let directColors = new Map();
+let themeColorUsage = new Map();
 let slideHtmls = [];
+let slideCanvases = [];
 let previewDebounceTimer = null;
 
 const $ = (sel) => document.querySelector(sel);
@@ -56,27 +65,23 @@ async function handleFile(file) {
     originalBuffer = await file.arrayBuffer();
 
     showLoading('Extracting colors...');
-    const { directColors, themeColorUsage } = await extractColors(originalBuffer);
+    ({ directColors, themeColorUsage } = await extractColors(originalBuffer));
 
-    showLoading('Scanning images...');
+    showLoading('Scanning media...');
     imageColorMap = await extractImageColors(originalBuffer);
-
-    colorList = buildColorList(directColors, themeColorUsage, imageColorMap);
+    svgColorMap = await extractSvgColors(originalBuffer);
 
     themeNameToOrigHex = new Map();
     for (const [name, { hex }] of themeColorUsage) {
       themeNameToOrigHex.set(name, hex);
     }
 
-    colorMap = new Map();
-    for (const entry of colorList) {
-      colorMap.set(entry.hex, entry.hex);
-    }
+    rebuildColorList();
 
     showLoading('Rendering slides...');
     slideHtmls = await pptxToHtml(originalBuffer, {
-      width: 960,
-      height: 540,
+      width: RENDER_WIDTH,
+      height: RENDER_HEIGHT,
       scaleToFit: true,
     });
 
@@ -117,6 +122,28 @@ function hideLoading() {
   $('#main-content').classList.remove('hidden');
 }
 
+function rebuildColorList() {
+  const includeImages = $('#chk-include-images')?.checked;
+  colorList = buildColorList(
+    directColors,
+    themeColorUsage,
+    includeImages ? imageColorMap : undefined,
+    svgColorMap,
+  );
+
+  const oldMap = colorMap;
+  colorMap = new Map();
+  for (const entry of colorList) {
+    colorMap.set(entry.hex, oldMap.get(entry.hex) || entry.hex);
+  }
+}
+
+$('#chk-include-images').addEventListener('change', () => {
+  rebuildColorList();
+  renderColorTable();
+  schedulePreviewUpdate();
+});
+
 // --- Render ---
 function renderUI() {
   $('#file-name').textContent = fileName;
@@ -149,8 +176,8 @@ function renderColorTable() {
       <div class="min-w-0">
         <div class="text-[0.65rem] font-mono text-gray-400 leading-tight truncate">#${entry.hex}</div>
         <div class="flex items-center gap-1">
-          <span class="badge ${entry.type === 'theme' ? 'badge-theme' : entry.type === 'image' ? 'badge-image' : 'badge-direct'}">
-            ${entry.type === 'theme' ? entry.themeLabel : entry.type === 'image' ? 'Image' : 'Direct'}
+          <span class="badge ${entry.type === 'theme' ? 'badge-theme' : entry.type === 'image' ? 'badge-image' : entry.type === 'svg' ? 'badge-svg' : 'badge-direct'}">
+            ${entry.type === 'theme' ? entry.themeLabel : entry.type === 'image' ? 'Image' : entry.type === 'svg' ? 'SVG' : 'Direct'}
           </span>
           <span class="text-[0.6rem] text-gray-600">${entry.count}x</span>
         </div>
@@ -209,64 +236,128 @@ function renderColorTable() {
   }
 }
 
+async function rasterizeSlide(html) {
+  const stage = document.createElement('div');
+  stage.className = 'slide-render-stage';
+  stage.style.width = `${RENDER_WIDTH}px`;
+  stage.style.height = `${RENDER_HEIGHT}px`;
+
+  const content = document.createElement('div');
+  content.className = 'slide-html-content';
+  content.innerHTML = html;
+  stage.appendChild(content);
+
+  document.body.appendChild(stage);
+
+  await document.fonts.ready;
+  await new Promise((r) => setTimeout(r, 50));
+
+  const canvas = await html2canvas(stage, {
+    width: RENDER_WIDTH,
+    height: RENDER_HEIGHT,
+    scale: CANVAS_SCALE,
+    useCORS: true,
+    allowTaint: true,
+    backgroundColor: '#ffffff',
+    logging: false,
+  });
+
+  document.body.removeChild(stage);
+  return canvas;
+}
+
 function renderSlides() {
   const container = $('#slides-container');
   container.innerHTML = '';
+  slideCanvases = new Array(slideHtmls.length).fill(null);
 
   slideHtmls.forEach((html, i) => {
     const wrapper = document.createElement('div');
     wrapper.className = 'slide-wrapper clickable-slide';
+    wrapper.dataset.slideIndex = i;
 
     const label = document.createElement('div');
     label.className = 'slide-label';
     label.textContent = `Slide ${i + 1}`;
 
-    const content = document.createElement('div');
-    content.className = 'slide-html-content';
-    content.innerHTML = html;
+    const placeholder = document.createElement('div');
+    placeholder.className = 'slide-placeholder';
+    placeholder.innerHTML = '<div class="spinner"></div>';
 
     wrapper.appendChild(label);
-    wrapper.appendChild(content);
+    wrapper.appendChild(placeholder);
 
     wrapper.addEventListener('click', (e) => {
-      handleSlideClick(e);
+      handleSlideClick(e, i);
     });
 
     container.appendChild(wrapper);
   });
+
+  rasterizeAllSlides();
 }
 
-// --- Slide click -> color pick ---
-function handleSlideClick(event) {
-  const el = document.elementFromPoint(event.clientX, event.clientY);
-  if (!el) return;
+async function rasterizeAllSlides() {
+  for (let i = 0; i < slideHtmls.length; i++) {
+    try {
+      const canvas = await rasterizeSlide(slideHtmls[i]);
+      slideCanvases[i] = canvas;
 
-  const color = getElementColor(el);
-  if (!color) return;
+      const wrapper = $(`.slide-wrapper[data-slide-index="${i}"]`);
+      if (!wrapper) continue;
 
-  const hex = rgbToHex(color).toUpperCase();
+      const placeholder = wrapper.querySelector('.slide-placeholder');
+      if (placeholder) placeholder.remove();
+
+      const img = document.createElement('img');
+      img.className = 'slide-canvas-content';
+      img.src = canvas.toDataURL('image/png');
+      img.alt = `Slide ${i + 1}`;
+      img.draggable = false;
+
+      const label = wrapper.querySelector('.slide-label');
+      if (label) {
+        label.after(img);
+      } else {
+        wrapper.appendChild(img);
+      }
+    } catch (err) {
+      console.error(`Failed to rasterize slide ${i + 1}:`, err);
+      const wrapper = $(`.slide-wrapper[data-slide-index="${i}"]`);
+      if (wrapper) {
+        const placeholder = wrapper.querySelector('.slide-placeholder');
+        if (placeholder) {
+          placeholder.innerHTML = `<span class="text-gray-400 text-sm">Render failed</span>`;
+        }
+      }
+    }
+  }
+}
+
+// --- Slide click -> read pixel from canvas ---
+function handleSlideClick(event, slideIndex) {
+  const canvas = slideCanvases[slideIndex];
+  if (!canvas) return;
+
+  const img = event.currentTarget.querySelector('.slide-canvas-content');
+  if (!img) return;
+
+  const rect = img.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const x = Math.round((event.clientX - rect.left) * scaleX);
+  const y = Math.round((event.clientY - rect.top) * scaleY);
+
+  const ctx = canvas.getContext('2d');
+  const pixel = ctx.getImageData(x, y, 1, 1).data;
+  const hex = [pixel[0], pixel[1], pixel[2]]
+    .map((c) => c.toString(16).padStart(2, '0'))
+    .join('')
+    .toUpperCase();
+
   if (hex.length === 6) {
     highlightColorRow(hex);
   }
-}
-
-function getElementColor(el) {
-  const style = window.getComputedStyle(el);
-
-  if (style.backgroundColor && style.backgroundColor !== 'rgba(0, 0, 0, 0)' && style.backgroundColor !== 'transparent') {
-    return style.backgroundColor;
-  }
-  if (style.color && style.color !== 'rgba(0, 0, 0, 0)') {
-    return style.color;
-  }
-  return null;
-}
-
-function rgbToHex(rgb) {
-  const match = rgb.match(/\d+/g);
-  if (!match || match.length < 3) return '';
-  const [r, g, b] = match.map(Number);
-  return [r, g, b].map(c => c.toString(16).padStart(2, '0')).join('');
 }
 
 function highlightColorRow(clickedHex) {
@@ -314,10 +405,10 @@ function schedulePreviewUpdate() {
 
 async function updateModifiedPreview() {
   try {
-    const modifiedBuffer = await buildModifiedBuffer(originalBuffer, colorMap, themeNameToOrigHex, imageColorMap);
+    const modifiedBuffer = await buildModifiedBuffer(originalBuffer, colorMap, themeNameToOrigHex, imageColorMap, svgColorMap);
     slideHtmls = await pptxToHtml(modifiedBuffer, {
-      width: 960,
-      height: 540,
+      width: RENDER_WIDTH,
+      height: RENDER_HEIGHT,
       scaleToFit: true,
     });
     renderSlides();
@@ -336,7 +427,7 @@ $('#btn-download').addEventListener('click', async () => {
   btn.innerHTML = '<span class="animate-pulse">Building...</span>';
 
   try {
-    const blob = await replaceColors(originalBuffer, colorMap, themeNameToOrigHex, imageColorMap);
+    const blob = await replaceColors(originalBuffer, colorMap, themeNameToOrigHex, imageColorMap, svgColorMap);
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;

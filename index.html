@@ -66,32 +66,33 @@
           </div>
         </div>
 
-        <!-- Scrollable content area -->
-        <div id="scroll-area" class="flex-1 overflow-y-auto min-h-0">
-          <div class="max-w-7xl mx-auto px-4 py-4">
-            <!-- Two-column layout -->
-            <div class="grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-6 items-start">
+        <!-- Content area: single-scroll on mobile, dual independent scroll on lg -->
+        <div class="flex-1 min-h-0 overflow-y-auto lg:overflow-hidden lg:flex lg:gap-6 max-w-7xl mx-auto w-full px-4 py-4">
 
-              <!-- Left: Slide previews -->
-              <div id="slides-container" class="space-y-4 min-w-0">
-                <!-- Slides rendered here -->
-              </div>
-
-              <!-- Right: Color table -->
-              <div class="lg:sticky lg:top-4 lg:self-start lg:max-h-[calc(100vh-9rem)] flex flex-col">
-                <div class="bg-gray-900 rounded-2xl border border-gray-800 overflow-hidden flex flex-col max-h-[inherit]">
-                  <div class="px-4 py-3 border-b border-gray-800 shrink-0">
-                    <h3 class="font-semibold">Color Map</h3>
-                    <p class="text-xs text-gray-500 mt-0.5">Click a slide to pick colors. Click a swatch to change it.</p>
-                  </div>
-                  <div id="color-table" class="divide-y divide-gray-800 overflow-y-auto">
-                    <!-- Color rows rendered here -->
-                  </div>
-                </div>
-              </div>
-
+          <!-- Left: Slide previews -->
+          <div class="min-w-0 lg:flex-1 lg:overflow-y-auto">
+            <div id="slides-container" class="space-y-4">
+              <!-- Slides rendered here -->
             </div>
           </div>
+
+          <!-- Right: Color table -->
+          <div class="mt-6 lg:mt-0 lg:w-[320px] lg:shrink-0 lg:flex lg:flex-col lg:min-h-0">
+            <div class="bg-gray-900 rounded-2xl border border-gray-800 overflow-hidden flex flex-col max-h-80 lg:max-h-none lg:flex-1 lg:min-h-0">
+              <div class="px-4 py-3 border-b border-gray-800 shrink-0">
+                <h3 class="font-semibold">Color Map</h3>
+                <p class="text-xs text-gray-500 mt-0.5">Click a slide to pick colors. Click a swatch to change it.</p>
+                <label class="flex items-center gap-2 mt-2 text-xs text-gray-400 cursor-pointer select-none">
+                  <input type="checkbox" id="chk-include-images" class="accent-indigo-500 rounded" />
+                  Include image colors
+                </label>
+              </div>
+              <div id="color-table" class="divide-y divide-gray-800 overflow-y-auto">
+                <!-- Color rows rendered here -->
+              </div>
+            </div>
+          </div>
+
         </div>
       </div>
     </div>
