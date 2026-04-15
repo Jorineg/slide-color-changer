@@ -9,9 +9,7 @@ let fileName = '';
 let colorList = [];
 let colorMap = new Map();
 let themeNameToOrigHex = new Map();
-let originalSlideHtmls = [];
-let modifiedSlideHtmls = [];
-let activeTab = 'original';
+let slideHtmls = [];
 let previewDebounceTimer = null;
 
 const $ = (sel) => document.querySelector(sel);
@@ -70,14 +68,12 @@ async function handleFile(file) {
     }
 
     showLoading('Rendering slides...');
-    originalSlideHtmls = await pptxToHtml(originalBuffer, {
+    slideHtmls = await pptxToHtml(originalBuffer, {
       width: 960,
       height: 540,
       scaleToFit: true,
     });
-    modifiedSlideHtmls = [...originalSlideHtmls];
 
-    activeTab = 'original';
     hideLoading();
     renderUI();
   } catch (err) {
@@ -118,11 +114,10 @@ function hideLoading() {
 // --- Render ---
 function renderUI() {
   $('#file-name').textContent = fileName;
-  $('#slide-count').textContent = `${originalSlideHtmls.length} slide${originalSlideHtmls.length !== 1 ? 's' : ''}`;
+  $('#slide-count').textContent = `${slideHtmls.length} slide${slideHtmls.length !== 1 ? 's' : ''}`;
 
   renderColorTable();
   renderSlides();
-  setupTabs();
 }
 
 function renderColorTable() {
@@ -130,7 +125,7 @@ function renderColorTable() {
   container.innerHTML = '';
 
   if (colorList.length === 0) {
-    container.innerHTML = '<div class="px-5 py-8 text-center text-gray-500 text-sm">No colors found in this presentation.</div>';
+    container.innerHTML = '<div class="px-4 py-8 text-center text-gray-500 text-sm">No colors found in this presentation.</div>';
     return;
   }
 
@@ -139,38 +134,34 @@ function renderColorTable() {
     const isModified = currentHex !== entry.hex;
 
     const row = document.createElement('div');
-    row.className = 'color-row flex items-center gap-3 px-4 py-3';
+    row.className = 'color-row flex items-center gap-2 px-3 py-2';
     row.dataset.colorId = entry.id;
     row.dataset.origHex = entry.hex;
 
     row.innerHTML = `
-      <div class="flex items-center gap-3 flex-1 min-w-0">
-        <div class="color-swatch original-swatch" style="background:#${entry.hex}" title="#${entry.hex}"></div>
-        <div class="flex flex-col min-w-0">
-          <span class="text-xs font-mono text-gray-400">#${entry.hex}</span>
-          <div class="flex items-center gap-1.5 mt-0.5">
-            <span class="badge ${entry.type === 'theme' ? 'badge-theme' : 'badge-direct'}">
-              ${entry.type === 'theme' ? entry.themeLabel : 'Direct'}
-            </span>
-            <span class="text-[0.65rem] text-gray-600">${entry.count}x</span>
-          </div>
+      <div class="color-swatch original-swatch" style="background:#${entry.hex}" title="#${entry.hex}"></div>
+      <div class="flex flex-col min-w-0 flex-1">
+        <span class="text-[0.65rem] font-mono text-gray-400 leading-tight">#${entry.hex}</span>
+        <div class="flex items-center gap-1">
+          <span class="badge ${entry.type === 'theme' ? 'badge-theme' : 'badge-direct'}">
+            ${entry.type === 'theme' ? entry.themeLabel : 'Direct'}
+          </span>
+          <span class="text-[0.6rem] text-gray-600">${entry.count}x</span>
         </div>
       </div>
-      <svg class="arrow-icon h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+      <svg class="arrow-icon h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
         <path stroke-linecap="round" stroke-linejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" />
       </svg>
-      <div class="flex items-center gap-2">
-        <div class="color-swatch target-swatch${isModified ? ' ring-2 ring-indigo-500' : ''}" style="background:#${currentHex}" title="#${currentHex}"></div>
-        <div class="flex flex-col items-end">
-          <span class="text-xs font-mono text-gray-400 target-hex">#${currentHex}</span>
-          <div class="flex items-center gap-1 mt-0.5">
-            ${isModified ? `<button class="reset-btn text-[0.65rem] text-indigo-400 hover:text-indigo-300 cursor-pointer">Reset</button>` : ''}
-            ${'EyeDropper' in window ? `<button class="eyedropper-btn text-[0.65rem] text-gray-500 hover:text-gray-300 cursor-pointer" title="Pick from screen">
-              <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M15.042 21.672L13.684 16.6m0 0l-2.51 2.225.569-9.47 5.227 7.917-3.286-.672zM12 2.25V4.5m5.834.166l-1.591 1.591M20.25 10.5H18M7.757 14.743l-1.59 1.59M6 10.5H3.75m4.007-4.243l-1.59-1.59" />
-              </svg>
-            </button>` : ''}
-          </div>
+      <div class="color-swatch target-swatch${isModified ? ' ring-2 ring-indigo-500' : ''}" style="background:#${currentHex}" title="#${currentHex}"></div>
+      <div class="flex flex-col items-end min-w-0">
+        <span class="text-[0.65rem] font-mono text-gray-400 leading-tight target-hex">#${currentHex}</span>
+        <div class="flex items-center gap-1">
+          ${isModified ? `<button class="reset-btn text-[0.6rem] text-indigo-400 hover:text-indigo-300 cursor-pointer leading-tight">Reset</button>` : ''}
+          ${'EyeDropper' in window ? `<button class="eyedropper-btn text-gray-500 hover:text-gray-300 cursor-pointer leading-tight" title="Pick from screen">
+            <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15.042 21.672L13.684 16.6m0 0l-2.51 2.225.569-9.47 5.227 7.917-3.286-.672zM12 2.25V4.5m5.834.166l-1.591 1.591M20.25 10.5H18M7.757 14.743l-1.59 1.59M6 10.5H3.75m4.007-4.243l-1.59-1.59" />
+            </svg>
+          </button>` : ''}
         </div>
       </div>
     `;
@@ -216,9 +207,7 @@ function renderSlides() {
   const container = $('#slides-container');
   container.innerHTML = '';
 
-  const htmls = activeTab === 'original' ? originalSlideHtmls : modifiedSlideHtmls;
-
-  htmls.forEach((html, i) => {
+  slideHtmls.forEach((html, i) => {
     const wrapper = document.createElement('div');
     wrapper.className = 'slide-wrapper clickable-slide';
 
@@ -239,28 +228,6 @@ function renderSlides() {
 
     container.appendChild(wrapper);
   });
-}
-
-function setupTabs() {
-  const tabOriginal = $('#tab-original');
-  const tabModified = $('#tab-modified');
-
-  tabOriginal.className = 'px-4 py-1.5 rounded-md text-sm font-medium bg-gray-700 text-white transition-colors';
-  tabModified.className = 'px-4 py-1.5 rounded-md text-sm font-medium text-gray-400 hover:text-white transition-colors';
-
-  tabOriginal.onclick = () => {
-    activeTab = 'original';
-    tabOriginal.className = 'px-4 py-1.5 rounded-md text-sm font-medium bg-gray-700 text-white transition-colors';
-    tabModified.className = 'px-4 py-1.5 rounded-md text-sm font-medium text-gray-400 hover:text-white transition-colors';
-    renderSlides();
-  };
-
-  tabModified.onclick = () => {
-    activeTab = 'modified';
-    tabModified.className = 'px-4 py-1.5 rounded-md text-sm font-medium bg-gray-700 text-white transition-colors';
-    tabOriginal.className = 'px-4 py-1.5 rounded-md text-sm font-medium text-gray-400 hover:text-white transition-colors';
-    renderSlides();
-  };
 }
 
 // --- Slide click -> color pick ---
@@ -342,15 +309,12 @@ function schedulePreviewUpdate() {
 async function updateModifiedPreview() {
   try {
     const modifiedBuffer = await buildModifiedBuffer(originalBuffer, colorMap, themeNameToOrigHex);
-    modifiedSlideHtmls = await pptxToHtml(modifiedBuffer, {
+    slideHtmls = await pptxToHtml(modifiedBuffer, {
       width: 960,
       height: 540,
       scaleToFit: true,
     });
-
-    if (activeTab === 'modified') {
-      renderSlides();
-    }
+    renderSlides();
   } catch (err) {
     console.error('Preview update failed:', err);
   }
