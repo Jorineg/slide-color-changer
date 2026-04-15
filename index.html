@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Slide Color Changer</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎨</text></svg>">
+  </head>
+  <body class="bg-gray-950 text-gray-100 min-h-screen">
+    <div id="app" class="max-w-7xl mx-auto px-4 py-8">
+
+      <!-- Header -->
+      <header class="text-center mb-8">
+        <h1 class="text-3xl font-bold text-white">Slide Color Changer</h1>
+        <p class="text-gray-400 mt-1">Upload a .pptx, remap colors, download the result. Fully in-browser, fully private.</p>
+      </header>
+
+      <!-- Drop Zone -->
+      <div id="dropzone"
+        class="border-2 border-dashed border-gray-600 rounded-2xl p-12 text-center cursor-pointer
+               hover:border-indigo-500 hover:bg-gray-900 transition-colors duration-200 mb-8"
+        role="button" tabindex="0">
+        <input type="file" id="file-input" accept=".pptx" class="hidden" />
+        <div class="space-y-3">
+          <svg class="mx-auto h-12 w-12 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+          </svg>
+          <p class="text-lg text-gray-300">Drop a <strong>.pptx</strong> file here or <span class="text-indigo-400 underline">click to browse</span></p>
+          <p class="text-sm text-gray-500">Your file never leaves your browser</p>
+        </div>
+      </div>
+
+      <!-- Loading spinner -->
+      <div id="loading" class="hidden text-center py-12">
+        <div class="inline-block h-10 w-10 animate-spin rounded-full border-4 border-indigo-500 border-t-transparent"></div>
+        <p class="mt-3 text-gray-400" id="loading-text">Processing presentation...</p>
+      </div>
+
+      <!-- Main content (hidden until file loaded) -->
+      <div id="main-content" class="hidden">
+
+        <!-- Toolbar -->
+        <div class="flex flex-wrap items-center justify-between gap-4 mb-6">
+          <div class="flex items-center gap-3">
+            <h2 class="text-xl font-semibold" id="file-name"></h2>
+            <span class="text-sm text-gray-500" id="slide-count"></span>
+          </div>
+          <div class="flex items-center gap-3">
+            <button id="btn-reset-all"
+              class="px-4 py-2 text-sm rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors">
+              Reset All Colors
+            </button>
+            <button id="btn-download"
+              class="px-5 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium transition-colors flex items-center gap-2">
+              <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+              </svg>
+              Download Modified .pptx
+            </button>
+          </div>
+        </div>
+
+        <!-- Two-column layout -->
+        <div class="grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-6">
+
+          <!-- Left: Slide previews -->
+          <div class="space-y-6">
+            <!-- Preview mode toggle -->
+            <div class="flex rounded-lg bg-gray-800 p-1 w-fit">
+              <button id="tab-original" class="px-4 py-1.5 rounded-md text-sm font-medium bg-gray-700 text-white transition-colors">
+                Original
+              </button>
+              <button id="tab-modified" class="px-4 py-1.5 rounded-md text-sm font-medium text-gray-400 hover:text-white transition-colors">
+                Modified
+              </button>
+            </div>
+
+            <div id="slides-container" class="space-y-4">
+              <!-- Slides rendered here -->
+            </div>
+          </div>
+
+          <!-- Right: Color table -->
+          <div class="lg:sticky lg:top-4 lg:self-start">
+            <div class="bg-gray-900 rounded-2xl border border-gray-800 overflow-hidden">
+              <div class="px-5 py-4 border-b border-gray-800">
+                <h3 class="font-semibold text-lg">Color Map</h3>
+                <p class="text-sm text-gray-500 mt-0.5">Click a slide to pick colors. Click a swatch to change it.</p>
+              </div>
+              <div id="color-table" class="divide-y divide-gray-800 max-h-[calc(100vh-200px)] overflow-y-auto">
+                <!-- Color rows rendered here -->
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
