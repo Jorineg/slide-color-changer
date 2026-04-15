@@ -15,10 +15,6 @@ const THEME_COLOR_NAMES = {
   folHlink: 'Followed Link',
 };
 
-/**
- * Parse the theme XML to extract theme color definitions.
- * Returns a map of schemeClr name -> hex color (uppercase, no #).
- */
 function parseThemeColors(themeXml) {
   const parser = new DOMParser();
   const doc = parser.parseFromString(themeXml, 'application/xml');
@@ -43,25 +39,81 @@ function parseThemeColors(themeXml) {
 }
 
 /**
+ * Resolve the theme used by each slide master by following the .rels files.
+ * Returns a merged color map from all themes referenced by slide masters,
+ * with the first slide master's theme taking priority.
+ */
+async function resolveThemeColors(zip) {
+  const allThemeColors = {};
+
+  const themeFiles = zip.file(/ppt\/theme\/theme\d*\.xml/);
+  const themeColorsByFile = {};
+  for (const f of themeFiles) {
+    themeColorsByFile[f.name] = parseThemeColors(await f.async('string'));
+  }
+
+  // Try to find slide master -> theme mapping via .rels files
+  const masterRelsFiles = zip.file(/ppt\/slideMasters\/_rels\/slideMaster\d+\.xml\.rels$/);
+  const mastersProcessed = new Set();
+
+  for (const relsFile of masterRelsFiles) {
+    const relsXml = await relsFile.async('string');
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(relsXml, 'application/xml');
+
+    for (const rel of doc.getElementsByTagName('Relationship')) {
+      const type = rel.getAttribute('Type') || '';
+      if (type.includes('/theme')) {
+        let target = rel.getAttribute('Target') || '';
+        // Resolve relative path: ../theme/theme1.xml -> ppt/theme/theme1.xml
+        if (target.startsWith('..')) {
+          target = 'ppt' + target.substring(2);
+        } else if (!target.startsWith('ppt/')) {
+          target = 'ppt/slideMasters/' + target;
+        }
+
+        if (themeColorsByFile[target] && !mastersProcessed.has(target)) {
+          mastersProcessed.add(target);
+          const colors = themeColorsByFile[target];
+          for (const [name, hex] of Object.entries(colors)) {
+            if (!allThemeColors[name]) {
+              allThemeColors[name] = hex;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Fallback: if no masters resolved, merge all themes (theme1 preferred)
+  if (Object.keys(allThemeColors).length === 0) {
+    const sorted = Object.keys(themeColorsByFile).sort();
+    for (const file of sorted) {
+      for (const [name, hex] of Object.entries(themeColorsByFile[file])) {
+        if (!allThemeColors[name]) {
+          allThemeColors[name] = hex;
+        }
+      }
+    }
+  }
+
+  return allThemeColors;
+}
+
+/**
  * Walk all XML files in the PPTX looking for color references.
- * Returns { directColors: Map<hex, count>, themeColors: Map<schemeName, { hex, count }> }
  */
 export async function extractColors(zipOrBuffer) {
   const zip = zipOrBuffer instanceof JSZip
     ? zipOrBuffer
     : await JSZip.loadAsync(zipOrBuffer);
 
-  let themeColorMap = {};
-  const themeFile = zip.file(/ppt\/theme\/theme\d*\.xml/);
-  if (themeFile.length > 0) {
-    const xml = await themeFile[0].async('string');
-    themeColorMap = parseThemeColors(xml);
-  }
+  const themeColorMap = await resolveThemeColors(zip);
 
   const directColors = new Map();
   const themeColorUsage = new Map();
 
-  const xmlFiles = zip.file(/ppt\/(slides|slideLayouts|slideMasters)\/.*\.xml$/);
+  const xmlFiles = zip.file(/ppt\/(slides|slideLayouts|slideMasters)\/[^/]+\.xml$/);
 
   for (const file of xmlFiles) {
     const xml = await file.async('string');
@@ -100,9 +152,10 @@ export async function extractColors(zipOrBuffer) {
 export function buildColorList(directColors, themeColorUsage) {
   const list = [];
 
+  const themeHexSet = new Set([...themeColorUsage.values()].map(t => t.hex));
+
   for (const [hex, count] of directColors) {
-    const isDuplicate = [...themeColorUsage.values()].some(t => t.hex === hex);
-    if (!isDuplicate) {
+    if (!themeHexSet.has(hex)) {
       list.push({ id: `direct-${hex}`, hex, count, type: 'direct' });
     }
   }

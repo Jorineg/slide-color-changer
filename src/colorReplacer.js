@@ -2,15 +2,38 @@ import JSZip from 'jszip';
 
 /**
  * Apply color replacements to the PPTX and return a new Blob.
- *
- * @param {ArrayBuffer} originalBuffer - The original .pptx file
- * @param {Map<string, string>} colorMap - Map of original hex -> new hex (both uppercase, no #)
- * @param {Map<string, string>} themeNameToOrigHex - Map of theme name -> original hex
- * @returns {Promise<Blob>} Modified .pptx as a Blob
  */
 export async function replaceColors(originalBuffer, colorMap, themeNameToOrigHex) {
   const zip = await JSZip.loadAsync(originalBuffer);
+  const { directReplacements, themeReplacements } = buildReplacementMaps(colorMap, themeNameToOrigHex);
 
+  await applyToSlideFiles(zip, directReplacements, themeReplacements);
+  await applyToThemeFiles(zip, themeReplacements);
+
+  return zip.generateAsync({
+    type: 'blob',
+    mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  });
+}
+
+/**
+ * Build a modified PPTX as ArrayBuffer for re-rendering preview.
+ */
+export async function buildModifiedBuffer(originalBuffer, colorMap, themeNameToOrigHex) {
+  const { directReplacements, themeReplacements } = buildReplacementMaps(colorMap, themeNameToOrigHex);
+
+  if (directReplacements.size === 0 && themeReplacements.size === 0) {
+    return originalBuffer;
+  }
+
+  const zip = await JSZip.loadAsync(originalBuffer);
+  await applyToSlideFiles(zip, directReplacements, themeReplacements);
+  await applyToThemeFiles(zip, themeReplacements);
+
+  return zip.generateAsync({ type: 'arraybuffer' });
+}
+
+function buildReplacementMaps(colorMap, themeNameToOrigHex) {
   const directReplacements = new Map();
   const themeReplacements = new Map();
 
@@ -26,44 +49,45 @@ export async function replaceColors(originalBuffer, colorMap, themeNameToOrigHex
     }
   }
 
-  const slideFiles = zip.file(/ppt\/(slides|slideLayouts|slideMasters)\/.*\.xml$/);
+  return { directReplacements, themeReplacements };
+}
+
+async function applyToSlideFiles(zip, directReplacements, themeReplacements) {
+  if (directReplacements.size === 0 && themeReplacements.size === 0) return;
+
+  const slideFiles = zip.file(/ppt\/(slides|slideLayouts|slideMasters)\/[^/]+\.xml$/);
+
   for (const file of slideFiles) {
     let xml = await file.async('string');
     let modified = false;
 
     if (directReplacements.size > 0) {
       const replaced = replaceDirectColors(xml, directReplacements);
-      if (replaced !== xml) {
-        xml = replaced;
-        modified = true;
-      }
+      if (replaced !== xml) { xml = replaced; modified = true; }
     }
 
     if (themeReplacements.size > 0) {
-      const replaced = replaceSchemeColorsWithDirect(xml, themeReplacements);
-      if (replaced !== xml) {
-        xml = replaced;
-        modified = true;
-      }
+      const replaced = replaceSchemeColors(xml, themeReplacements);
+      if (replaced !== xml) { xml = replaced; modified = true; }
     }
 
     if (modified) {
       zip.file(file.name, xml);
     }
   }
+}
 
-  if (themeReplacements.size > 0) {
-    const themeFiles = zip.file(/ppt\/theme\/theme\d*\.xml/);
-    for (const file of themeFiles) {
-      let xml = await file.async('string');
-      const replaced = replaceThemeDefinitions(xml, themeReplacements);
-      if (replaced !== xml) {
-        zip.file(file.name, replaced);
-      }
+async function applyToThemeFiles(zip, themeReplacements) {
+  if (themeReplacements.size === 0) return;
+
+  const themeFiles = zip.file(/ppt\/theme\/theme\d*\.xml/);
+  for (const file of themeFiles) {
+    const xml = await file.async('string');
+    const replaced = replaceThemeDefinitions(xml, themeReplacements);
+    if (replaced !== xml) {
+      zip.file(file.name, replaced);
     }
   }
-
-  return zip.generateAsync({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' });
 }
 
 function replaceDirectColors(xml, replacements) {
@@ -75,23 +99,26 @@ function replaceDirectColors(xml, replacements) {
 }
 
 /**
- * For theme colors that are being remapped, convert schemeClr references
- * to direct srgbClr with the new color. This ensures the visual change
- * takes effect even if the theme is also used elsewhere.
+ * Replace schemeClr references with srgbClr, preserving child modifier
+ * elements (alpha, tint, shade, satMod, lumMod, etc).
  */
-function replaceSchemeColorsWithDirect(xml, themeReplacements) {
+function replaceSchemeColors(xml, themeReplacements) {
   for (const [themeName, newHex] of themeReplacements) {
-    const pattern = new RegExp(
+    // Self-closing: <a:schemeClr val="accent6"/>
+    const selfClosing = new RegExp(
       `<a:schemeClr\\s+val="${themeName}"\\s*/>`,
       'g'
     );
-    xml = xml.replace(pattern, `<a:srgbClr val="${newHex}"/>`);
+    xml = xml.replace(selfClosing, `<a:srgbClr val="${newHex}"/>`);
 
-    const patternWithChildren = new RegExp(
+    // With children: preserve child modifier elements
+    const withChildren = new RegExp(
       `<a:schemeClr\\s+val="${themeName}"\\s*>(.*?)</a:schemeClr>`,
       'gs'
     );
-    xml = xml.replace(patternWithChildren, `<a:srgbClr val="${newHex}"/>`);
+    xml = xml.replace(withChildren, (_, children) => {
+      return `<a:srgbClr val="${newHex}">${children}</a:srgbClr>`;
+    });
   }
   return xml;
 }
@@ -102,6 +129,7 @@ function replaceThemeDefinitions(xml, themeReplacements) {
   const colorScheme = doc.getElementsByTagName('a:clrScheme')[0];
   if (!colorScheme) return xml;
 
+  let changed = false;
   for (const [themeName, newHex] of themeReplacements) {
     const el = colorScheme.getElementsByTagName(`a:${themeName}`)[0];
     if (!el) continue;
@@ -113,62 +141,9 @@ function replaceThemeDefinitions(xml, themeReplacements) {
     );
     srgb.setAttribute('val', newHex);
     el.appendChild(srgb);
+    changed = true;
   }
 
-  const serializer = new XMLSerializer();
-  return serializer.serializeToString(doc);
-}
-
-/**
- * Build a modified PPTX as ArrayBuffer for re-rendering preview.
- */
-export async function buildModifiedBuffer(originalBuffer, colorMap, themeNameToOrigHex) {
-  const zip = await JSZip.loadAsync(originalBuffer);
-
-  const directReplacements = new Map();
-  const themeReplacements = new Map();
-
-  for (const [origHex, newHex] of colorMap) {
-    if (origHex === newHex) continue;
-    directReplacements.set(origHex, newHex);
-  }
-
-  for (const [themeName, origHex] of themeNameToOrigHex) {
-    const newHex = colorMap.get(origHex);
-    if (newHex && newHex !== origHex) {
-      themeReplacements.set(themeName, newHex);
-    }
-  }
-
-  if (directReplacements.size === 0 && themeReplacements.size === 0) {
-    return originalBuffer;
-  }
-
-  const slideFiles = zip.file(/ppt\/(slides|slideLayouts|slideMasters)\/.*\.xml$/);
-  for (const file of slideFiles) {
-    let xml = await file.async('string');
-    let modified = false;
-
-    if (directReplacements.size > 0) {
-      const replaced = replaceDirectColors(xml, directReplacements);
-      if (replaced !== xml) { xml = replaced; modified = true; }
-    }
-    if (themeReplacements.size > 0) {
-      const replaced = replaceSchemeColorsWithDirect(xml, themeReplacements);
-      if (replaced !== xml) { xml = replaced; modified = true; }
-    }
-
-    if (modified) zip.file(file.name, xml);
-  }
-
-  if (themeReplacements.size > 0) {
-    const themeFiles = zip.file(/ppt\/theme\/theme\d*\.xml/);
-    for (const file of themeFiles) {
-      let xml = await file.async('string');
-      const replaced = replaceThemeDefinitions(xml, themeReplacements);
-      if (replaced !== xml) zip.file(file.name, replaced);
-    }
-  }
-
-  return zip.generateAsync({ type: 'arraybuffer' });
+  if (!changed) return xml;
+  return new XMLSerializer().serializeToString(doc);
 }
