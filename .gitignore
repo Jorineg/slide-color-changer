@@ -3,3 +3,4 @@ dist
 *.local
 test.pptx
 *.pptx
+public/webviewer-core

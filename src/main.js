@@ -5,12 +5,16 @@ import { extractColors, buildColorList } from './colorExtractor.js';
 import { extractImageColors, extractSvgColors } from './imageColors.js';
 import { replaceColors, buildModifiedBuffer } from './colorReplacer.js';
 import { openColorPicker, useEyeDropper } from './colorPicker.js';
+import { loadApryseCore, isApryseLoaded, renderSlidesHD } from './apryseRenderer.js';
 
 const RENDER_WIDTH = 960;
 const RENDER_HEIGHT = 540;
 const CANVAS_SCALE = 2;
 
+const HD_PREF_KEY = 'slide-color-changer-hd-mode';
+
 let originalBuffer = null;
+let currentBuffer = null;
 let fileName = '';
 let colorList = [];
 let colorMap = new Map();
@@ -21,6 +25,8 @@ let directColors = new Map();
 let themeColorUsage = new Map();
 let slideHtmls = [];
 let slideCanvases = [];
+let hdMode = localStorage.getItem(HD_PREF_KEY) === 'true';
+let hdLoading = false;
 let previewDebounceTimer = null;
 
 const $ = (sel) => document.querySelector(sel);
@@ -78,6 +84,8 @@ async function handleFile(file) {
 
     rebuildColorList();
 
+    currentBuffer = originalBuffer;
+
     showLoading('Rendering slides...');
     slideHtmls = await pptxToHtml(originalBuffer, {
       width: RENDER_WIDTH,
@@ -86,7 +94,14 @@ async function handleFile(file) {
     });
 
     hideLoading();
+    updateHdButton();
     renderUI();
+
+    if (hdMode && isApryseLoaded()) {
+      triggerHdRender(currentBuffer);
+    } else if (hdMode) {
+      triggerHdRender(currentBuffer);
+    }
   } catch (err) {
     console.error('Failed to process file:', err);
     hideLoading();
@@ -147,7 +162,8 @@ $('#chk-include-images').addEventListener('change', () => {
 // --- Render ---
 function renderUI() {
   $('#file-name').textContent = fileName;
-  $('#slide-count').textContent = `${slideHtmls.length} slide${slideHtmls.length !== 1 ? 's' : ''}`;
+  const count = slideCanvases.length || slideHtmls.length;
+  $('#slide-count').textContent = `${count} slide${count !== 1 ? 's' : ''}`;
 
   renderColorTable();
   renderSlides();
@@ -430,6 +446,100 @@ function colorDistance(hex1, hex2) {
   return Math.sqrt((r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2);
 }
 
+// --- HD renderer ---
+function updateHdButton() {
+  const btn = $('#btn-hd-preview');
+  const label = $('#hd-label');
+  if (!btn) return;
+
+  if (hdLoading) {
+    btn.className = 'hd-toggle hd-loading px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-1.5';
+    label.textContent = 'Loading HD...';
+  } else if (hdMode) {
+    btn.className = 'hd-toggle hd-active px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-1.5';
+    label.textContent = 'HD On';
+  } else {
+    btn.className = 'hd-toggle px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-1.5';
+    label.textContent = 'HD Preview';
+  }
+}
+
+async function triggerHdRender(buffer) {
+  if (hdLoading) return;
+  hdLoading = true;
+  updateHdButton();
+
+  try {
+    const canvases = await renderSlidesHD(buffer, (msg) => {
+      const label = $('#hd-label');
+      if (label) label.textContent = msg;
+    });
+
+    slideCanvases = canvases;
+    hdMode = true;
+    localStorage.setItem(HD_PREF_KEY, 'true');
+
+    renderSlidesFromCanvases(canvases);
+  } catch (err) {
+    console.error('HD render failed:', err);
+    showError(`HD render failed: ${err.message}`);
+    hdMode = false;
+    localStorage.removeItem(HD_PREF_KEY);
+  } finally {
+    hdLoading = false;
+    updateHdButton();
+  }
+}
+
+function renderSlidesFromCanvases(canvases) {
+  const container = $('#slides-container');
+  container.innerHTML = '';
+  slideCanvases = canvases;
+
+  const count = canvases.length;
+  $('#slide-count').textContent = `${count} slide${count !== 1 ? 's' : ''}`;
+
+  canvases.forEach((canvas, i) => {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'slide-wrapper clickable-slide';
+    wrapper.dataset.slideIndex = i;
+
+    const label = document.createElement('div');
+    label.className = 'slide-label';
+    label.textContent = `Slide ${i + 1}`;
+
+    const img = document.createElement('img');
+    img.className = 'slide-canvas-content';
+    img.src = canvas.toDataURL('image/png');
+    img.alt = `Slide ${i + 1}`;
+    img.draggable = false;
+
+    wrapper.appendChild(label);
+    wrapper.appendChild(img);
+
+    wrapper.addEventListener('click', (e) => {
+      handleSlideClick(e, i);
+    });
+
+    container.appendChild(wrapper);
+  });
+}
+
+$('#btn-hd-preview').addEventListener('click', async () => {
+  if (hdLoading) return;
+
+  if (hdMode) {
+    hdMode = false;
+    localStorage.removeItem(HD_PREF_KEY);
+    updateHdButton();
+    if (originalBuffer) renderSlides();
+    return;
+  }
+
+  if (!currentBuffer) return;
+  triggerHdRender(currentBuffer);
+});
+
 // --- Preview update ---
 function schedulePreviewUpdate() {
   clearTimeout(previewDebounceTimer);
@@ -439,6 +549,13 @@ function schedulePreviewUpdate() {
 async function updateModifiedPreview() {
   try {
     const modifiedBuffer = await buildModifiedBuffer(originalBuffer, colorMap, themeNameToOrigHex, imageColorMap, svgColorMap);
+    currentBuffer = modifiedBuffer;
+
+    if (hdMode && isApryseLoaded()) {
+      triggerHdRender(modifiedBuffer);
+      return;
+    }
+
     slideHtmls = await pptxToHtml(modifiedBuffer, {
       width: RENDER_WIDTH,
       height: RENDER_HEIGHT,
