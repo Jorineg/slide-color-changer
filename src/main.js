@@ -1,7 +1,7 @@
 import './style.css';
 import { pptxToHtml } from '@jvmr/pptx-to-html';
 import html2canvas from 'html2canvas';
-import { extractColors, buildColorList } from './colorExtractor.js';
+import { extractColors, buildColorList, buildMediaSlideMap } from './colorExtractor.js';
 import { extractImageColors, extractSvgColors } from './imageColors.js';
 import { replaceColors, buildModifiedBuffer } from './colorReplacer.js';
 import { openColorPicker, useEyeDropper } from './colorPicker.js';
@@ -20,7 +20,9 @@ let colorList = [];
 let colorMap = new Map();
 let themeNameToOrigHex = new Map();
 let imageColorMap = new Map();
+let imageGroups = [];
 let svgColorMap = new Map();
+let mediaSlideMap = new Map();
 let directColors = new Map();
 let themeColorUsage = new Map();
 let slideHtmls = [];
@@ -74,8 +76,9 @@ async function handleFile(file) {
     ({ directColors, themeColorUsage } = await extractColors(originalBuffer));
 
     showLoading('Scanning media...');
-    imageColorMap = await extractImageColors(originalBuffer);
+    ({ imageColorMap, imageGroups } = await extractImageColors(originalBuffer));
     svgColorMap = await extractSvgColors(originalBuffer);
+    mediaSlideMap = await buildMediaSlideMap(originalBuffer);
 
     themeNameToOrigHex = new Map();
     for (const [name, { hex }] of themeColorUsage) {
@@ -144,8 +147,9 @@ function rebuildColorList() {
   colorList = buildColorList(
     directColors,
     themeColorUsage,
-    imageColorMap,
+    imageGroups,
     svgColorMap,
+    mediaSlideMap,
   );
 
   const oldMap = colorMap;
@@ -199,6 +203,7 @@ function renderColorTable() {
             ${entry.type === 'theme' ? entry.themeLabel : entry.type === 'image' ? 'Image' : entry.type === 'svg' ? 'SVG' : 'Direct'}
           </span>
           <span class="text-[0.6rem] text-gray-600">${entry.count}x</span>
+          ${entry.slides && entry.slides.length > 0 ? `<span class="text-[0.55rem] text-gray-500" title="Appears on slide${entry.slides.length > 1 ? 's' : ''} ${entry.slides.join(', ')}">S${entry.slides.join(',')}</span>` : ''}
         </div>
       </div>
       <svg class="arrow-icon h-3 w-3 justify-self-center" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">

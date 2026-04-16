@@ -6,6 +6,9 @@ const ENTROPY_THRESHOLD = 5.0;
 const COVERAGE85_THRESHOLD = 30;
 const CHROMATIC_SAT_MIN = 12;
 const MIN_CLUSTER_PIXEL_PCT = 0.3;
+const CROSS_IMAGE_LAB_DIST = 8;
+const BIDIR_GROUP_THRESHOLD = 0.5;
+const THUMB_MAX_DIM = 64;
 
 function rgbToHsv(r, g, b) {
   r /= 255; g /= 255; b /= 255;
@@ -70,6 +73,14 @@ function labDistance(a, b) {
   return Math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2);
 }
 
+function classifyColor(r, g, b) {
+  const [, s] = rgbToHsv(r, g, b);
+  if (r > 230 && g > 230 && b > 230) return 'white';
+  if (r < 30 && g < 30 && b < 30) return 'black';
+  if (s < CHROMATIC_SAT_MIN) return 'gray';
+  return 'chromatic';
+}
+
 function loadImageFromBytes(bytes, mime) {
   return new Promise((resolve, reject) => {
     const blob = new Blob([bytes], { type: mime });
@@ -90,18 +101,23 @@ function getImagePixels(img) {
   return ctx.getImageData(0, 0, canvas.width, canvas.height);
 }
 
+function makeThumbnail(img) {
+  const scale = Math.min(1, THUMB_MAX_DIM / Math.max(img.width, img.height));
+  const w = Math.round(img.width * scale);
+  const h = Math.round(img.height * scale);
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0, w, h);
+  return canvas.toDataURL('image/png');
+}
+
 /**
- * Classify an image as graphic (few distinct colors, recolorable) vs photo
- * (continuous color distribution, not recolorable).
- *
- * Uses two metrics that together give robust separation:
- * 1. Entropy of quantized color histogram — graphics < 5.0, photos >= 5.0
- * 2. Colors for 85% coverage — graphics need <= 30 quantized bins,
- *    photos need 39+
- *
- * Returns dominant chromatic colors for graphics, empty array for photos.
+ * Analyze an image and return all dominant color clusters with metadata.
+ * Returns { isPhoto, colors: [{hex, pixelCount, kind, lab}] }
  */
-function findDominantColors(imageData) {
+function analyzeImage(imageData) {
   const { data, width, height } = imageData;
   const totalPixels = width * height;
 
@@ -118,7 +134,9 @@ function findDominantColors(imageData) {
     q16Map.set(key, (q16Map.get(key) || 0) + 1);
   }
 
-  if (opaquePixels < totalPixels * 0.01) return [];
+  if (opaquePixels < totalPixels * 0.01) {
+    return { isPhoto: false, colors: [] };
+  }
 
   let entropy = 0;
   for (const count of q16Map.values()) {
@@ -128,10 +146,7 @@ function findDominantColors(imageData) {
 
   const q16Sorted = [...q16Map.entries()]
     .map(([key, count]) => ({
-      r: (key >> 16) & 0xFF,
-      g: (key >> 8) & 0xFF,
-      b: key & 0xFF,
-      count,
+      r: (key >> 16) & 0xFF, g: (key >> 8) & 0xFF, b: key & 0xFF, count,
     }))
     .sort((a, b) => b.count - a.count);
 
@@ -143,15 +158,13 @@ function findDominantColors(imageData) {
   }
 
   if (entropy >= ENTROPY_THRESHOLD || colorsFor85 > COVERAGE85_THRESHOLD) {
-    return [];
+    return { isPhoto: true, colors: [] };
   }
 
   const entries = q16Sorted.map(e => ({
     ...e,
     lab: rgbToLab(e.r, e.g, e.b),
-    rSum: e.r * e.count,
-    gSum: e.g * e.count,
-    bSum: e.b * e.count,
+    rSum: e.r * e.count, gSum: e.g * e.count, bSum: e.b * e.count,
   }));
 
   const clusters = [];
@@ -163,10 +176,9 @@ function findDominantColors(imageData) {
         cl.gSum += entry.g * entry.count;
         cl.bSum += entry.b * entry.count;
         cl.count += entry.count;
-        const total = cl.count;
-        const avgR = Math.round(cl.rSum / total);
-        const avgG = Math.round(cl.gSum / total);
-        const avgB = Math.round(cl.bSum / total);
+        const avgR = Math.round(cl.rSum / cl.count);
+        const avgG = Math.round(cl.gSum / cl.count);
+        const avgB = Math.round(cl.bSum / cl.count);
         cl.lab = rgbToLab(avgR, avgG, avgB);
         merged = true;
         break;
@@ -174,40 +186,142 @@ function findDominantColors(imageData) {
     }
     if (!merged) {
       clusters.push({
-        count: entry.count,
-        lab: entry.lab,
-        rSum: entry.rSum,
-        gSum: entry.gSum,
-        bSum: entry.bSum,
+        count: entry.count, lab: entry.lab,
+        rSum: entry.rSum, gSum: entry.gSum, bSum: entry.bSum,
       });
     }
   }
 
   clusters.sort((a, b) => b.count - a.count);
-
   const minPixels = opaquePixels * MIN_CLUSTER_PIXEL_PCT / 100;
-  const results = [];
 
+  const colors = [];
   for (const cl of clusters) {
     if (cl.count < minPixels) continue;
     const r = Math.round(cl.rSum / cl.count);
     const g = Math.round(cl.gSum / cl.count);
     const b = Math.round(cl.bSum / cl.count);
-    const [, s] = rgbToHsv(r, g, b);
-    if (s < CHROMATIC_SAT_MIN) continue;
-
-    results.push({
+    colors.push({
       hex: rgbToHex(r, g, b),
       pixelCount: cl.count,
+      kind: classifyColor(r, g, b),
+      lab: rgbToLab(r, g, b),
     });
   }
 
-  return results;
+  return { isPhoto: false, colors };
 }
 
 /**
- * Scan all images in ppt/media/ and extract dominant colors.
- * Returns a Map of imagePath -> [{ hex, pixelCount }]
+ * Compute bidirectional chromatic match score between two color sets.
+ * Returns min(A→B fraction, B→A fraction) considering only chromatic colors.
+ * Score of 1.0 = identical chromatic palettes, 0.5 = one is subset of other
+ * (with at most 2x size difference), 0 = no overlap.
+ */
+function bidirectionalChromaticScore(colorsA, colorsB) {
+  const chrA = colorsA.filter(c => c.kind === 'chromatic');
+  const chrB = colorsB.filter(c => c.kind === 'chromatic');
+  if (chrA.length === 0 && chrB.length === 0) return 1.0;
+  if (chrA.length === 0 || chrB.length === 0) return 0;
+
+  let matchedA = 0;
+  for (const ca of chrA) {
+    for (const cb of chrB) {
+      if (labDistance(ca.lab, cb.lab) < CROSS_IMAGE_LAB_DIST) { matchedA++; break; }
+    }
+  }
+  let matchedB = 0;
+  for (const cb of chrB) {
+    for (const ca of chrA) {
+      if (labDistance(ca.lab, cb.lab) < CROSS_IMAGE_LAB_DIST) { matchedB++; break; }
+    }
+  }
+
+  return Math.min(matchedA / chrA.length, matchedB / chrB.length);
+}
+
+/**
+ * Group graphic images by chromatic color similarity using bidirectional
+ * matching with union-find.
+ *
+ * Two images are linked if the minimum of (fraction of A's chromatic colors
+ * found in B, fraction of B's in A) >= BIDIR_GROUP_THRESHOLD.
+ * This prevents a many-colored image (e.g. world map) from absorbing
+ * single-color icons, since the map→icon direction scores near 0.
+ *
+ * @param {Map} analysisMap - path -> { colors, isPhoto }
+ * @returns {Array<{paths: string[], colors: Array<{hex, kind, lab}>}>}
+ */
+function groupImages(analysisMap) {
+  const chromatics = [];
+  for (const [path, analysis] of analysisMap) {
+    if (analysis.isPhoto) continue;
+    const chr = analysis.colors.filter(c => c.kind === 'chromatic');
+    if (chr.length === 0) continue;
+    chromatics.push({ path, colors: analysis.colors });
+  }
+
+  const parent = new Map();
+  for (const img of chromatics) parent.set(img.path, img.path);
+  function find(x) {
+    while (parent.get(x) !== x) {
+      parent.set(x, parent.get(parent.get(x)));
+      x = parent.get(x);
+    }
+    return x;
+  }
+  function union(a, b) {
+    const ra = find(a), rb = find(b);
+    if (ra !== rb) parent.set(ra, rb);
+  }
+
+  for (let i = 0; i < chromatics.length; i++) {
+    for (let j = i + 1; j < chromatics.length; j++) {
+      const score = bidirectionalChromaticScore(
+        chromatics[i].colors,
+        chromatics[j].colors,
+      );
+      if (score >= BIDIR_GROUP_THRESHOLD) {
+        union(chromatics[i].path, chromatics[j].path);
+      }
+    }
+  }
+
+  const groupMap = new Map();
+  for (const img of chromatics) {
+    const root = find(img.path);
+    if (!groupMap.has(root)) groupMap.set(root, []);
+    groupMap.get(root).push(img);
+  }
+
+  const groups = [];
+  for (const members of groupMap.values()) {
+    const paths = members.map(m => m.path);
+
+    const unionColors = [];
+    for (const member of members) {
+      for (const c of member.colors) {
+        let found = false;
+        for (const uc of unionColors) {
+          if (labDistance(c.lab, uc.lab) < CROSS_IMAGE_LAB_DIST) {
+            found = true;
+            break;
+          }
+        }
+        if (!found) unionColors.push({ ...c });
+      }
+    }
+
+    groups.push({ paths, colors: unionColors });
+  }
+
+  return groups;
+}
+
+/**
+ * Scan all raster images in ppt/media/ and return:
+ * - imageColorMap: Map<path, [{hex, pixelCount}]> (chromatic only, for recoloring)
+ * - imageGroups: Array of {paths, colors, thumbnail} (for UI display)
  */
 export async function extractImageColors(zipOrBuffer) {
   const zip = zipOrBuffer instanceof JSZip
@@ -215,7 +329,8 @@ export async function extractImageColors(zipOrBuffer) {
     : await JSZip.loadAsync(zipOrBuffer);
 
   const imageFiles = zip.file(/ppt\/media\/.*\.(png|jpg|jpeg|gif)$/i);
-  const imageColorMap = new Map();
+  const analysisMap = new Map();
+  const thumbnails = new Map();
 
   for (const file of imageFiles) {
     try {
@@ -227,17 +342,35 @@ export async function extractImageColors(zipOrBuffer) {
 
       const img = await loadImageFromBytes(bytes, mime);
       const imageData = getImagePixels(img);
-      const colors = findDominantColors(imageData);
+      const analysis = analyzeImage(imageData);
+      analysisMap.set(file.name, analysis);
 
-      if (colors.length > 0) {
-        imageColorMap.set(file.name, colors);
+      if (!analysis.isPhoto && analysis.colors.some(c => c.kind === 'chromatic')) {
+        thumbnails.set(file.name, makeThumbnail(img));
       }
     } catch {
       // Skip images that fail to decode
     }
   }
 
-  return imageColorMap;
+  const imageColorMap = new Map();
+  for (const [path, analysis] of analysisMap) {
+    if (analysis.isPhoto) continue;
+    const chromatic = analysis.colors
+      .filter(c => c.kind === 'chromatic')
+      .map(c => ({ hex: c.hex, pixelCount: c.pixelCount }));
+    if (chromatic.length > 0) {
+      imageColorMap.set(path, chromatic);
+    }
+  }
+
+  const imageGroups = groupImages(analysisMap);
+  for (const group of imageGroups) {
+    group.thumbnail = thumbnails.get(group.paths[0]) || null;
+    group.imageCount = group.paths.length;
+  }
+
+  return { imageColorMap, imageGroups };
 }
 
 /**
