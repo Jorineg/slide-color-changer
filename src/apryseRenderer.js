@@ -25,7 +25,6 @@ export async function loadApryseCore(onProgress) {
     if (!Core) throw new Error('Core failed to initialize');
 
     Core.setWorkerPath(WORKER_PATH);
-    Core.enableFullPDF();
 
     onProgress?.('HD renderer ready');
     coreLoaded = true;
@@ -46,15 +45,9 @@ export async function renderSlidesHD(arrayBuffer, onProgress) {
   const Core = window.Core;
   onProgress?.('Opening presentation...');
 
-  const blob = new Blob([arrayBuffer], {
-    type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-  });
-
-  const doc = await Core.createDocument(blob, {
+  const doc = await Core.createDocument(arrayBuffer, {
     extension: 'pptx',
-    officeOptions: {
-      templateValues: undefined,
-    },
+    filename: 'presentation.pptx',
   });
 
   const pageCount = doc.getPageCount();
@@ -63,13 +56,12 @@ export async function renderSlidesHD(arrayBuffer, onProgress) {
   for (let i = 1; i <= pageCount; i++) {
     onProgress?.(`Rendering slide ${i}/${pageCount}...`);
 
-    const canvas = await new Promise((resolve, reject) => {
+    const canvas = await new Promise((resolve) => {
       doc.loadCanvas({
         pageNumber: i,
         zoom: 2,
         pageRotation: Core.PageRotation.e_0,
         drawComplete: (c) => resolve(c),
-        renderError: (err) => reject(err || new Error(`Render failed for slide ${i}`)),
       });
     });
 
