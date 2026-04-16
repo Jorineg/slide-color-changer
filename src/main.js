@@ -141,11 +141,10 @@ function hideLoading() {
 }
 
 function rebuildColorList() {
-  const includeImages = $('#chk-include-images')?.checked;
   colorList = buildColorList(
     directColors,
     themeColorUsage,
-    includeImages ? imageColorMap : undefined,
+    imageColorMap,
     svgColorMap,
   );
 
@@ -157,9 +156,7 @@ function rebuildColorList() {
 }
 
 $('#chk-include-images').addEventListener('change', () => {
-  rebuildColorList();
   renderColorTable();
-  schedulePreviewUpdate();
 });
 
 // --- Render ---
@@ -176,12 +173,15 @@ function renderColorTable() {
   const container = $('#color-table');
   container.innerHTML = '';
 
-  if (colorList.length === 0) {
+  const showImages = $('#chk-include-images')?.checked;
+  const visibleList = showImages ? colorList : colorList.filter(e => e.type !== 'image');
+
+  if (visibleList.length === 0) {
     container.innerHTML = '<div class="px-4 py-8 text-center text-gray-500 text-sm">No colors found in this presentation.</div>';
     return;
   }
 
-  for (const entry of colorList) {
+  for (const entry of visibleList) {
     const currentHex = colorMap.get(entry.hex) || entry.hex;
     const isModified = currentHex !== entry.hex;
 

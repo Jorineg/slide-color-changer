@@ -1,11 +1,11 @@
 import JSZip from 'jszip';
 
-const MAX_DOMINANT_COLORS = 3;
-const MIN_COLOR_PIXELS_PCT = 1.5;
-const HUE_BUCKET_SIZE = 12;
-const SATURATION_THRESHOLD = 15;
-const ACHROMATIC_VALUE_MIN = 20;
-const ACHROMATIC_VALUE_MAX = 90;
+const QUANT_STEP = 16;
+const LAB_MERGE_DIST = 15;
+const ENTROPY_THRESHOLD = 5.0;
+const COVERAGE85_THRESHOLD = 30;
+const CHROMATIC_SAT_MIN = 12;
+const MIN_CLUSTER_PIXEL_PCT = 0.3;
 
 function rgbToHsv(r, g, b) {
   r /= 255; g /= 255; b /= 255;
@@ -53,6 +53,23 @@ function rgbToHex(r, g, b) {
   return [r, g, b].map(c => Math.max(0, Math.min(255, c)).toString(16).padStart(2, '0')).join('').toUpperCase();
 }
 
+function rgbToLab(r, g, b) {
+  let rl = r / 255, gl = g / 255, bl = b / 255;
+  rl = rl > 0.04045 ? Math.pow((rl + 0.055) / 1.055, 2.4) : rl / 12.92;
+  gl = gl > 0.04045 ? Math.pow((gl + 0.055) / 1.055, 2.4) : gl / 12.92;
+  bl = bl > 0.04045 ? Math.pow((bl + 0.055) / 1.055, 2.4) : bl / 12.92;
+  let x = (rl * 0.4124564 + gl * 0.3575761 + bl * 0.1804375) / 0.95047;
+  let y = (rl * 0.2126729 + gl * 0.7151522 + bl * 0.0721750);
+  let z = (rl * 0.0193339 + gl * 0.1191920 + bl * 0.9503041) / 1.08883;
+  const f = t => t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116;
+  x = f(x); y = f(y); z = f(z);
+  return [116 * y - 16, 500 * (x - y), 200 * (y - z)];
+}
+
+function labDistance(a, b) {
+  return Math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2);
+}
+
 function loadImageFromBytes(bytes, mime) {
   return new Promise((resolve, reject) => {
     const blob = new Blob([bytes], { type: mime });
@@ -74,97 +91,118 @@ function getImagePixels(img) {
 }
 
 /**
- * Find dominant chromatic colors in an image using hue bucketing.
- * Returns up to MAX_DOMINANT_COLORS hex colors, or empty array if
- * the image is too complex (photos/screenshots).
+ * Classify an image as graphic (few distinct colors, recolorable) vs photo
+ * (continuous color distribution, not recolorable).
+ *
+ * Uses two metrics that together give robust separation:
+ * 1. Entropy of quantized color histogram — graphics < 5.0, photos >= 5.0
+ * 2. Colors for 85% coverage — graphics need <= 30 quantized bins,
+ *    photos need 39+
+ *
+ * Returns dominant chromatic colors for graphics, empty array for photos.
  */
 function findDominantColors(imageData) {
   const { data, width, height } = imageData;
   const totalPixels = width * height;
-  const hueBuckets = new Array(Math.ceil(360 / HUE_BUCKET_SIZE)).fill(0);
-  const bucketRgbSum = hueBuckets.map(() => [0, 0, 0]);
-  let chromaticPixels = 0;
+
+  const q16Map = new Map();
+  let opaquePixels = 0;
 
   for (let i = 0; i < data.length; i += 4) {
-    const r = data[i], g = data[i + 1], b = data[i + 2], a = data[i + 3];
-    if (a < 30) continue;
-
-    const [h, s, v] = rgbToHsv(r, g, b);
-
-    if (s < SATURATION_THRESHOLD) continue;
-    if (v < ACHROMATIC_VALUE_MIN || v > ACHROMATIC_VALUE_MAX * 1.11) {
-      // keep going, this is still chromatic if sat is high enough
-    }
-    if (s < SATURATION_THRESHOLD) continue;
-
-    chromaticPixels++;
-    const bucket = Math.floor(h / HUE_BUCKET_SIZE) % hueBuckets.length;
-    hueBuckets[bucket]++;
-    bucketRgbSum[bucket][0] += r;
-    bucketRgbSum[bucket][1] += g;
-    bucketRgbSum[bucket][2] += b;
+    if (data[i + 3] < 30) continue;
+    opaquePixels++;
+    const r = Math.round(data[i] / QUANT_STEP) * QUANT_STEP;
+    const g = Math.round(data[i + 1] / QUANT_STEP) * QUANT_STEP;
+    const b = Math.round(data[i + 2] / QUANT_STEP) * QUANT_STEP;
+    const key = (r << 16) | (g << 8) | b;
+    q16Map.set(key, (q16Map.get(key) || 0) + 1);
   }
 
-  if (chromaticPixels < totalPixels * 0.01) return [];
+  if (opaquePixels < totalPixels * 0.01) return [];
 
-  // Merge adjacent buckets into clusters
-  const clusters = [];
-  let i = 0;
-  while (i < hueBuckets.length) {
-    if (hueBuckets[i] === 0) { i++; continue; }
+  let entropy = 0;
+  for (const count of q16Map.values()) {
+    const p = count / opaquePixels;
+    if (p > 0) entropy -= p * Math.log2(p);
+  }
 
-    let count = hueBuckets[i];
-    let rSum = bucketRgbSum[i][0];
-    let gSum = bucketRgbSum[i][1];
-    let bSum = bucketRgbSum[i][2];
-    let j = i + 1;
-
-    while (j < hueBuckets.length && hueBuckets[j] > 0) {
-      count += hueBuckets[j];
-      rSum += bucketRgbSum[j][0];
-      gSum += bucketRgbSum[j][1];
-      bSum += bucketRgbSum[j][2];
-      j++;
-    }
-
-    clusters.push({
+  const q16Sorted = [...q16Map.entries()]
+    .map(([key, count]) => ({
+      r: (key >> 16) & 0xFF,
+      g: (key >> 8) & 0xFF,
+      b: key & 0xFF,
       count,
-      r: Math.round(rSum / count),
-      g: Math.round(gSum / count),
-      b: Math.round(bSum / count),
-    });
-    i = j;
+    }))
+    .sort((a, b) => b.count - a.count);
+
+  let cumulative = 0;
+  let colorsFor85 = 0;
+  for (let i = 0; i < q16Sorted.length; i++) {
+    cumulative += q16Sorted[i].count;
+    if (cumulative >= opaquePixels * 0.85) { colorsFor85 = i + 1; break; }
   }
 
-  // Also merge the wrap-around (last cluster with first if both exist)
-  if (clusters.length >= 2) {
-    const first = clusters[0];
-    const last = clusters[clusters.length - 1];
-    const firstHue = rgbToHsv(first.r, first.g, first.b)[0];
-    const lastHue = rgbToHsv(last.r, last.g, last.b)[0];
-    if ((360 - lastHue + firstHue) < HUE_BUCKET_SIZE * 3) {
-      const merged = first.count + last.count;
-      first.r = Math.round((first.r * first.count + last.r * last.count) / merged);
-      first.g = Math.round((first.g * first.count + last.g * last.count) / merged);
-      first.b = Math.round((first.b * first.count + last.b * last.count) / merged);
-      first.count = merged;
-      clusters.pop();
+  if (entropy >= ENTROPY_THRESHOLD || colorsFor85 > COVERAGE85_THRESHOLD) {
+    return [];
+  }
+
+  const entries = q16Sorted.map(e => ({
+    ...e,
+    lab: rgbToLab(e.r, e.g, e.b),
+    rSum: e.r * e.count,
+    gSum: e.g * e.count,
+    bSum: e.b * e.count,
+  }));
+
+  const clusters = [];
+  for (const entry of entries) {
+    let merged = false;
+    for (const cl of clusters) {
+      if (labDistance(entry.lab, cl.lab) < LAB_MERGE_DIST) {
+        cl.rSum += entry.r * entry.count;
+        cl.gSum += entry.g * entry.count;
+        cl.bSum += entry.b * entry.count;
+        cl.count += entry.count;
+        const total = cl.count;
+        const avgR = Math.round(cl.rSum / total);
+        const avgG = Math.round(cl.gSum / total);
+        const avgB = Math.round(cl.bSum / total);
+        cl.lab = rgbToLab(avgR, avgG, avgB);
+        merged = true;
+        break;
+      }
+    }
+    if (!merged) {
+      clusters.push({
+        count: entry.count,
+        lab: entry.lab,
+        rSum: entry.rSum,
+        gSum: entry.gSum,
+        bSum: entry.bSum,
+      });
     }
   }
 
   clusters.sort((a, b) => b.count - a.count);
 
-  const minPixels = totalPixels * MIN_COLOR_PIXELS_PCT / 100;
-  const significant = clusters.filter(c => c.count >= minPixels);
+  const minPixels = opaquePixels * MIN_CLUSTER_PIXEL_PCT / 100;
+  const results = [];
 
-  if (significant.length === 0 || significant.length > MAX_DOMINANT_COLORS) {
-    return [];
+  for (const cl of clusters) {
+    if (cl.count < minPixels) continue;
+    const r = Math.round(cl.rSum / cl.count);
+    const g = Math.round(cl.gSum / cl.count);
+    const b = Math.round(cl.bSum / cl.count);
+    const [, s] = rgbToHsv(r, g, b);
+    if (s < CHROMATIC_SAT_MIN) continue;
+
+    results.push({
+      hex: rgbToHex(r, g, b),
+      pixelCount: cl.count,
+    });
   }
 
-  return significant.map(c => ({
-    hex: rgbToHex(c.r, c.g, c.b),
-    pixelCount: c.count,
-  }));
+  return results;
 }
 
 /**
