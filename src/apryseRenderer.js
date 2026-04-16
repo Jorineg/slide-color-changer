@@ -59,7 +59,6 @@ function waitForAllPages(doc) {
 
     doc.addEventListener('pagesUpdated', onPagesUpdated);
 
-    // If all pages are already available (e.g. small doc), resolve after a short wait
     setTimeout(() => {
       if (!settled && doc.getPageCount() > 0) {
         checkDone();
@@ -68,7 +67,12 @@ function waitForAllPages(doc) {
   });
 }
 
-export async function renderSlidesHD(arrayBuffer, onProgress) {
+/**
+ * Renders slides progressively. Calls onSlide(canvas, index) as each
+ * slide finishes rendering, so the UI can display them immediately.
+ * Returns the total array of canvases when done.
+ */
+export async function renderSlidesHD(arrayBuffer, { onProgress, onSlideCount, onSlide }) {
   if (!coreLoaded) {
     await loadApryseCore(onProgress);
   }
@@ -83,6 +87,7 @@ export async function renderSlidesHD(arrayBuffer, onProgress) {
 
   onProgress?.('Converting slides...');
   const pageCount = await waitForAllPages(doc);
+  onSlideCount?.(pageCount);
 
   const canvases = [];
 
@@ -99,6 +104,7 @@ export async function renderSlidesHD(arrayBuffer, onProgress) {
     });
 
     canvases.push(canvas);
+    onSlide?.(canvas, i - 1);
   }
 
   return canvases;
