@@ -37,6 +37,37 @@ export function isApryseLoaded() {
   return coreLoaded;
 }
 
+function waitForAllPages(doc) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let debounceTimer = null;
+
+    const checkDone = () => {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          doc.removeEventListener('pagesUpdated', onPagesUpdated);
+          resolve(doc.getPageCount());
+        }
+      }, 500);
+    };
+
+    const onPagesUpdated = () => {
+      checkDone();
+    };
+
+    doc.addEventListener('pagesUpdated', onPagesUpdated);
+
+    // If all pages are already available (e.g. small doc), resolve after a short wait
+    setTimeout(() => {
+      if (!settled && doc.getPageCount() > 0) {
+        checkDone();
+      }
+    }, 200);
+  });
+}
+
 export async function renderSlidesHD(arrayBuffer, onProgress) {
   if (!coreLoaded) {
     await loadApryseCore(onProgress);
@@ -50,7 +81,9 @@ export async function renderSlidesHD(arrayBuffer, onProgress) {
     filename: 'presentation.pptx',
   });
 
-  const pageCount = doc.getPageCount();
+  onProgress?.('Converting slides...');
+  const pageCount = await waitForAllPages(doc);
+
   const canvases = [];
 
   for (let i = 1; i <= pageCount; i++) {
