@@ -114,8 +114,8 @@ function makeThumbnail(img) {
 }
 
 /**
- * Analyze an image and return all dominant color clusters with metadata.
- * Returns { isPhoto, colors: [{hex, pixelCount, kind, lab}] }
+ * Analyze an image and return all dominant color clusters.
+ * Includes white, black, and gray clusters (not just chromatic).
  */
 function analyzeImage(imageData) {
   const { data, width, height } = imageData;
@@ -213,10 +213,7 @@ function analyzeImage(imageData) {
 }
 
 /**
- * Compute bidirectional chromatic match score between two color sets.
- * Returns min(A→B fraction, B→A fraction) considering only chromatic colors.
- * Score of 1.0 = identical chromatic palettes, 0.5 = one is subset of other
- * (with at most 2x size difference), 0 = no overlap.
+ * Bidirectional chromatic match score between two color sets.
  */
 function bidirectionalChromaticScore(colorsA, colorsB) {
   const chrA = colorsA.filter(c => c.kind === 'chromatic');
@@ -243,26 +240,17 @@ function bidirectionalChromaticScore(colorsA, colorsB) {
 /**
  * Group graphic images by chromatic color similarity using bidirectional
  * matching with union-find.
- *
- * Two images are linked if the minimum of (fraction of A's chromatic colors
- * found in B, fraction of B's in A) >= BIDIR_GROUP_THRESHOLD.
- * This prevents a many-colored image (e.g. world map) from absorbing
- * single-color icons, since the map→icon direction scores near 0.
- *
- * @param {Map} analysisMap - path -> { colors, isPhoto }
- * @returns {Array<{paths: string[], colors: Array<{hex, kind, lab}>}>}
  */
 function groupImages(analysisMap) {
-  const chromatics = [];
+  const graphics = [];
   for (const [path, analysis] of analysisMap) {
     if (analysis.isPhoto) continue;
-    const chr = analysis.colors.filter(c => c.kind === 'chromatic');
-    if (chr.length === 0) continue;
-    chromatics.push({ path, colors: analysis.colors });
+    if (analysis.colors.length === 0) continue;
+    graphics.push({ path, colors: analysis.colors });
   }
 
   const parent = new Map();
-  for (const img of chromatics) parent.set(img.path, img.path);
+  for (const img of graphics) parent.set(img.path, img.path);
   function find(x) {
     while (parent.get(x) !== x) {
       parent.set(x, parent.get(parent.get(x)));
@@ -275,20 +263,20 @@ function groupImages(analysisMap) {
     if (ra !== rb) parent.set(ra, rb);
   }
 
-  for (let i = 0; i < chromatics.length; i++) {
-    for (let j = i + 1; j < chromatics.length; j++) {
+  for (let i = 0; i < graphics.length; i++) {
+    for (let j = i + 1; j < graphics.length; j++) {
       const score = bidirectionalChromaticScore(
-        chromatics[i].colors,
-        chromatics[j].colors,
+        graphics[i].colors,
+        graphics[j].colors,
       );
       if (score >= BIDIR_GROUP_THRESHOLD) {
-        union(chromatics[i].path, chromatics[j].path);
+        union(graphics[i].path, graphics[j].path);
       }
     }
   }
 
   const groupMap = new Map();
-  for (const img of chromatics) {
+  for (const img of graphics) {
     const root = find(img.path);
     if (!groupMap.has(root)) groupMap.set(root, []);
     groupMap.get(root).push(img);
@@ -320,8 +308,8 @@ function groupImages(analysisMap) {
 
 /**
  * Scan all raster images in ppt/media/ and return:
- * - imageColorMap: Map<path, [{hex, pixelCount}]> (chromatic only, for recoloring)
- * - imageGroups: Array of {paths, colors, thumbnail} (for UI display)
+ * - imageGroups: grouped images with union palette and thumbnails
+ * - imageAnalysis: per-image full palette (for pixel-level recoloring)
  */
 export async function extractImageColors(zipOrBuffer) {
   const zip = zipOrBuffer instanceof JSZip
@@ -345,22 +333,11 @@ export async function extractImageColors(zipOrBuffer) {
       const analysis = analyzeImage(imageData);
       analysisMap.set(file.name, analysis);
 
-      if (!analysis.isPhoto && analysis.colors.some(c => c.kind === 'chromatic')) {
+      if (!analysis.isPhoto && analysis.colors.length > 0) {
         thumbnails.set(file.name, makeThumbnail(img));
       }
     } catch {
       // Skip images that fail to decode
-    }
-  }
-
-  const imageColorMap = new Map();
-  for (const [path, analysis] of analysisMap) {
-    if (analysis.isPhoto) continue;
-    const chromatic = analysis.colors
-      .filter(c => c.kind === 'chromatic')
-      .map(c => ({ hex: c.hex, pixelCount: c.pixelCount }));
-    if (chromatic.length > 0) {
-      imageColorMap.set(path, chromatic);
     }
   }
 
@@ -370,19 +347,51 @@ export async function extractImageColors(zipOrBuffer) {
     group.imageCount = group.paths.length;
   }
 
-  return { imageColorMap, imageGroups };
+  const imageAnalysis = new Map();
+  for (const [path, analysis] of analysisMap) {
+    if (analysis.isPhoto || analysis.colors.length === 0) continue;
+    imageAnalysis.set(path, {
+      palette: analysis.colors.map(c => ({
+        hex: c.hex,
+        r: hexToRgb(c.hex)[0],
+        g: hexToRgb(c.hex)[1],
+        b: hexToRgb(c.hex)[2],
+      })),
+    });
+  }
+
+  return { imageGroups, imageAnalysis };
 }
 
 /**
- * Apply HSV hue-shift to an image and return the modified PNG as Uint8Array.
+ * Recolor an image using palette-delta shift.
  *
- * @param {Uint8Array} imageBytes - Original image bytes
- * @param {string} mime - MIME type
- * @param {Map<string, string>} colorReplacements - Map of origHex -> newHex (uppercase, no #)
- * @returns {Promise<Uint8Array|null>} Modified PNG bytes, or null if no changes needed
+ * For each pixel, finds the nearest palette cluster by RGB distance,
+ * then applies the RGB delta (target - source) to that pixel.
+ * This preserves anti-aliasing, shadows, and gradients while being predictable.
+ *
+ * @param {Uint8Array} imageBytes
+ * @param {string} mime
+ * @param {Array<{hex, r, g, b}>} palette - all clusters for this image
+ * @param {Map<string, string>} colorReplacements - origHex -> newHex
+ * @returns {Promise<Uint8Array|null>}
  */
-export async function recolorImage(imageBytes, mime, colorReplacements) {
-  if (colorReplacements.size === 0) return null;
+export async function recolorImage(imageBytes, mime, palette, colorReplacements) {
+  if (!colorReplacements || colorReplacements.size === 0) return null;
+
+  const paletteEntries = palette.map(p => {
+    const replacement = colorReplacements.get(p.hex);
+    let dr = 0, dg = 0, db = 0;
+    if (replacement) {
+      const [nr, ng, nb] = hexToRgb(replacement);
+      dr = nr - p.r;
+      dg = ng - p.g;
+      db = nb - p.b;
+    }
+    return { r: p.r, g: p.g, b: p.b, hasReplacement: !!replacement, dr, dg, db };
+  });
+
+  if (!paletteEntries.some(p => p.hasReplacement)) return null;
 
   const img = await loadImageFromBytes(imageBytes, mime);
   const canvas = document.createElement('canvas');
@@ -393,57 +402,35 @@ export async function recolorImage(imageBytes, mime, colorReplacements) {
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const { data } = imageData;
 
-  // Build hue-shift rules from the color replacements
-  const hueShifts = [];
-  for (const [origHex, newHex] of colorReplacements) {
-    const [or, og, ob] = hexToRgb(origHex);
-    const [origH, origS] = rgbToHsv(or, og, ob);
-    const [nr, ng, nb] = hexToRgb(newHex);
-    const [newH, newS] = rgbToHsv(nr, ng, nb);
-
-    if (origS < 10) continue;
-
-    hueShifts.push({
-      origHue: origH,
-      hueDelta: newH - origH,
-      satRatio: newS / Math.max(origS, 1),
-      tolerance: 30,
-    });
-  }
-
-  if (hueShifts.length === 0) return null;
-
   let changed = false;
   for (let i = 0; i < data.length; i += 4) {
-    const a = data[i + 3];
-    if (a < 10) continue;
+    if (data[i + 3] < 10) continue;
 
-    const r = data[i], g = data[i + 1], b = data[i + 2];
-    const [h, s, v] = rgbToHsv(r, g, b);
+    const pr = data[i], pg = data[i + 1], pb = data[i + 2];
 
-    if (s < 8) continue;
-
-    for (const shift of hueShifts) {
-      let hueDiff = Math.abs(h - shift.origHue);
-      if (hueDiff > 180) hueDiff = 360 - hueDiff;
-
-      if (hueDiff <= shift.tolerance) {
-        let newH = (h + shift.hueDelta + 360) % 360;
-        let newS = Math.min(100, s * shift.satRatio);
-        const [nr, ng, nb] = hsvToRgb(newH, newS, v);
-        data[i] = nr;
-        data[i + 1] = ng;
-        data[i + 2] = nb;
-        changed = true;
-        break;
+    let nearestIdx = 0;
+    let nearestDist = Infinity;
+    for (let j = 0; j < paletteEntries.length; j++) {
+      const pe = paletteEntries[j];
+      const dist = (pr - pe.r) ** 2 + (pg - pe.g) ** 2 + (pb - pe.b) ** 2;
+      if (dist < nearestDist) {
+        nearestDist = dist;
+        nearestIdx = j;
       }
     }
+
+    const nearest = paletteEntries[nearestIdx];
+    if (!nearest.hasReplacement) continue;
+
+    data[i] = Math.max(0, Math.min(255, pr + nearest.dr));
+    data[i + 1] = Math.max(0, Math.min(255, pg + nearest.dg));
+    data[i + 2] = Math.max(0, Math.min(255, pb + nearest.db));
+    changed = true;
   }
 
   if (!changed) return null;
 
   ctx.putImageData(imageData, 0, 0);
-
   const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
   return new Uint8Array(await blob.arrayBuffer());
 }
@@ -466,10 +453,6 @@ function findSvgColors(svgContent) {
   return [...colorCounts.entries()].map(([hex, count]) => ({ hex, count }));
 }
 
-/**
- * Scan all SVG files in ppt/media/ and extract hex colors.
- * Returns a Map of svgPath -> [{ hex, count }]
- */
 export async function extractSvgColors(zipOrBuffer) {
   const zip = zipOrBuffer instanceof JSZip
     ? zipOrBuffer
@@ -493,12 +476,6 @@ export async function extractSvgColors(zipOrBuffer) {
   return svgColorMap;
 }
 
-/**
- * Replace hex colors inside an SVG string.
- * @param {string} svgContent - Original SVG markup
- * @param {Map<string, string>} colorReplacements - origHex -> newHex (uppercase, no #)
- * @returns {string|null} Modified SVG, or null if unchanged
- */
 export function recolorSvg(svgContent, colorReplacements) {
   let modified = svgContent;
   let changed = false;

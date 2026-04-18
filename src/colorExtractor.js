@@ -38,11 +38,6 @@ function parseThemeColors(themeXml) {
   return colors;
 }
 
-/**
- * Resolve the theme used by each slide master by following the .rels files.
- * Returns a merged color map from all themes referenced by slide masters,
- * with the first slide master's theme taking priority.
- */
 async function resolveThemeColors(zip) {
   const allThemeColors = {};
 
@@ -52,7 +47,6 @@ async function resolveThemeColors(zip) {
     themeColorsByFile[f.name] = parseThemeColors(await f.async('string'));
   }
 
-  // Try to find slide master -> theme mapping via .rels files
   const masterRelsFiles = zip.file(/ppt\/slideMasters\/_rels\/slideMaster\d+\.xml\.rels$/);
   const mastersProcessed = new Set();
 
@@ -65,7 +59,6 @@ async function resolveThemeColors(zip) {
       const type = rel.getAttribute('Type') || '';
       if (type.includes('/theme')) {
         let target = rel.getAttribute('Target') || '';
-        // Resolve relative path: ../theme/theme1.xml -> ppt/theme/theme1.xml
         if (target.startsWith('..')) {
           target = 'ppt' + target.substring(2);
         } else if (!target.startsWith('ppt/')) {
@@ -85,7 +78,6 @@ async function resolveThemeColors(zip) {
     }
   }
 
-  // Fallback: if no masters resolved, merge all themes (theme1 preferred)
   if (Object.keys(allThemeColors).length === 0) {
     const sorted = Object.keys(themeColorsByFile).sort();
     for (const file of sorted) {
@@ -100,10 +92,6 @@ async function resolveThemeColors(zip) {
   return allThemeColors;
 }
 
-/**
- * Build a map from media file path (e.g. "ppt/media/image1.png") to an array
- * of 1-based slide numbers where the media appears.
- */
 export async function buildMediaSlideMap(zipOrBuffer) {
   const zip = zipOrBuffer instanceof JSZip
     ? zipOrBuffer
@@ -149,9 +137,6 @@ export async function buildMediaSlideMap(zipOrBuffer) {
   return mediaSlideMap;
 }
 
-/**
- * Walk all XML files in the PPTX looking for color references.
- */
 export async function extractColors(zipOrBuffer) {
   const zip = zipOrBuffer instanceof JSZip
     ? zipOrBuffer
@@ -195,77 +180,106 @@ export async function extractColors(zipOrBuffer) {
 }
 
 /**
- * Build a unified sorted color list for the UI.
+ * Build a unified color list for the UI.
  *
- * @param {Map} directColors
- * @param {Map} themeColorUsage
- * @param {Array} [imageGroups] - Optional array from extractImageColors()
- * @param {Map} [svgColorMap] - Optional map from extractSvgColors()
- * @param {Map} [mediaSlideMap] - Optional map from buildMediaSlideMap()
+ * Direct, theme, and SVG colors with the same hex are merged into one entry.
+ * Image palette colors are always separate entries (per group, per color).
  */
 export function buildColorList(directColors, themeColorUsage, imageGroups, svgColorMap, mediaSlideMap) {
   const list = [];
 
-  const themeHexSet = new Set([...themeColorUsage.values()].map(t => t.hex));
-
-  for (const [hex, count] of directColors) {
-    if (!themeHexSet.has(hex)) {
-      list.push({ id: `direct-${hex}`, hex, count, type: 'direct' });
+  // Collect all SVG hex → {totalCount, paths, slides}
+  const svgHexInfo = new Map();
+  if (svgColorMap && svgColorMap.size > 0) {
+    for (const [path, colors] of svgColorMap) {
+      const pathSlides = mediaSlideMap?.get(path) || [];
+      for (const { hex, count } of colors) {
+        if (!svgHexInfo.has(hex)) {
+          svgHexInfo.set(hex, { totalCount: 0, paths: [], slides: new Set() });
+        }
+        const info = svgHexInfo.get(hex);
+        info.totalCount += count;
+        if (!info.paths.includes(path)) info.paths.push(path);
+        for (const s of pathSlides) info.slides.add(s);
+      }
     }
   }
 
+  // Build unified entries: merge direct + theme + SVG by hex
+  const unifiedByHex = new Map();
+
+  for (const [hex, count] of directColors) {
+    if (!unifiedByHex.has(hex)) {
+      unifiedByHex.set(hex, { hex, count: 0, sources: [] });
+    }
+    const entry = unifiedByHex.get(hex);
+    entry.count += count;
+    entry.sources.push('direct');
+  }
+
   for (const [name, { hex, count }] of themeColorUsage) {
-    const directCount = directColors.get(hex) || 0;
+    if (!unifiedByHex.has(hex)) {
+      unifiedByHex.set(hex, { hex, count: 0, sources: [] });
+    }
+    const entry = unifiedByHex.get(hex);
+    entry.count += count;
+    entry.sources.push('theme');
+    entry.themeName = name;
+    entry.themeLabel = THEME_COLOR_NAMES[name] || name;
+  }
+
+  for (const [hex, info] of svgHexInfo) {
+    if (!unifiedByHex.has(hex)) {
+      unifiedByHex.set(hex, { hex, count: 0, sources: [] });
+    }
+    const entry = unifiedByHex.get(hex);
+    entry.count += info.totalCount;
+    entry.sources.push('svg');
+    entry.svgPaths = info.paths;
+    entry.svgSlides = [...info.slides].sort((a, b) => a - b);
+  }
+
+  for (const [hex, data] of unifiedByHex) {
+    const primaryType = data.sources.includes('theme') ? 'theme'
+      : data.sources.includes('direct') ? 'direct'
+      : 'svg';
+
     list.push({
-      id: `theme-${name}`,
+      id: `color-${hex}`,
       hex,
-      count: count + directCount,
-      type: 'theme',
-      themeName: name,
-      themeLabel: THEME_COLOR_NAMES[name] || name,
+      count: data.count,
+      type: primaryType,
+      sources: data.sources,
+      themeName: data.themeName || null,
+      themeLabel: data.themeLabel || null,
+      svgPaths: data.svgPaths || null,
+      slides: data.svgSlides || null,
     });
   }
 
+  // Image entries: per group, per palette color (separate from unified)
   if (imageGroups && imageGroups.length > 0) {
-    const existingHexes = new Set(list.map(e => e.hex));
     for (let gi = 0; gi < imageGroups.length; gi++) {
       const group = imageGroups[gi];
       const groupId = `imggrp-${gi}`;
       const slides = resolveGroupSlides(group.paths, mediaSlideMap);
-      const chromaticColors = group.colors.filter(c => c.kind === 'chromatic');
 
-      for (const color of chromaticColors) {
-        if (existingHexes.has(color.hex)) continue;
-        if (closeToAny(color.hex, existingHexes)) continue;
-
+      for (const color of group.colors) {
         list.push({
           id: `${groupId}-${color.hex}`,
           hex: color.hex,
           count: group.imageCount,
           type: 'image',
+          kind: color.kind,
           groupId,
+          groupIndex: gi,
           imagePaths: group.paths,
           imageCount: group.imageCount,
           thumbnail: group.thumbnail || null,
-          groupColors: chromaticColors.map(c => c.hex),
+          groupColors: group.colors.map(c => ({ hex: c.hex, kind: c.kind })),
           slides,
         });
       }
-    }
-  }
-
-  // Add SVG-derived colors
-  if (svgColorMap && svgColorMap.size > 0) {
-    const svgGroups = groupSvgColors(svgColorMap, list, mediaSlideMap);
-    for (const group of svgGroups) {
-      list.push({
-        id: `svg-${group.hex}`,
-        hex: group.hex,
-        count: group.totalCount,
-        type: 'svg',
-        svgPaths: group.paths,
-        slides: group.slides,
-      });
     }
   }
 
@@ -280,70 +294,4 @@ function resolveGroupSlides(paths, mediaSlideMap) {
     for (const s of mediaSlideMap.get(path) || []) slides.add(s);
   }
   return [...slides].sort((a, b) => a - b);
-}
-
-function closeToAny(hex, hexSet) {
-  for (const existing of hexSet) {
-    if (hexColorDistance(hex, existing) < 40) return true;
-  }
-  return false;
-}
-
-/**
- * Group SVG colors, deduplicating against existing list entries and across files.
- */
-function groupSvgColors(svgColorMap, existingList, mediaSlideMap) {
-  const existingHexes = new Set(existingList.map(e => e.hex));
-  const groups = new Map();
-
-  for (const [path, colors] of svgColorMap) {
-    const pathSlides = mediaSlideMap?.get(path) || [];
-    for (const { hex, count } of colors) {
-      if (existingHexes.has(hex)) continue;
-
-      let matchedHex = null;
-      for (const existing of existingHexes) {
-        if (hexColorDistance(hex, existing) < 40) {
-          matchedHex = existing;
-          break;
-        }
-      }
-      if (matchedHex) continue;
-
-      let groupKey = hex;
-      for (const [key] of groups) {
-        if (hexColorDistance(hex, key) < 40) {
-          groupKey = key;
-          break;
-        }
-      }
-
-      if (groups.has(groupKey)) {
-        const g = groups.get(groupKey);
-        if (!g.paths.includes(path)) g.paths.push(path);
-        for (const s of pathSlides) {
-          if (!g.slides.includes(s)) g.slides.push(s);
-        }
-        g.totalCount += count;
-      } else {
-        groups.set(groupKey, { hex: groupKey, paths: [path], totalCount: count, slides: [...pathSlides] });
-      }
-    }
-  }
-
-  for (const g of groups.values()) {
-    g.slides.sort((a, b) => a - b);
-  }
-
-  return [...groups.values()];
-}
-
-function hexColorDistance(hex1, hex2) {
-  const r1 = parseInt(hex1.substring(0, 2), 16);
-  const g1 = parseInt(hex1.substring(2, 4), 16);
-  const b1 = parseInt(hex1.substring(4, 6), 16);
-  const r2 = parseInt(hex2.substring(0, 2), 16);
-  const g2 = parseInt(hex2.substring(2, 4), 16);
-  const b2 = parseInt(hex2.substring(4, 6), 16);
-  return Math.sqrt((r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2);
 }

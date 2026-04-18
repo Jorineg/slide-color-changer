@@ -2,19 +2,86 @@ import JSZip from 'jszip';
 import { recolorImage, recolorSvg } from './imageColors.js';
 
 /**
+ * Build structured replacement data from the UI's colorMap (id → newHex).
+ *
+ * @param {Array} colorList - full color list with type info
+ * @param {Map<string, string>} colorMap - entry.id → newHex
+ * @param {Map<string, string>} themeNameToOrigHex - themeName → origHex
+ * @param {Map} svgColorMap - path → [{hex, count}]
+ * @param {Array} imageGroups - [{paths, colors, ...}]
+ * @param {Map} imageAnalysis - path → {palette: [{hex, r, g, b}]}
+ */
+export function buildReplacementPlan(colorList, colorMap, themeNameToOrigHex, svgColorMap, imageGroups, imageAnalysis) {
+  const xmlReplacements = new Map();
+  const themeReplacements = new Map();
+  const svgReplacements = new Map();
+  const imageGroupPlans = [];
+
+  for (const entry of colorList) {
+    const newHex = colorMap.get(entry.id);
+    if (!newHex || newHex === entry.hex) continue;
+
+    if (entry.type === 'image') {
+      continue; // handled below per-group
+    }
+
+    // Unified entry (direct/theme/SVG): apply to XML and SVGs where the hex appears
+    xmlReplacements.set(entry.hex, newHex);
+
+    if (entry.sources?.includes('svg')) {
+      svgReplacements.set(entry.hex, newHex);
+    }
+  }
+
+  // Theme replacements: derived from xmlReplacements
+  for (const [themeName, origHex] of themeNameToOrigHex) {
+    const newHex = xmlReplacements.get(origHex);
+    if (newHex) {
+      themeReplacements.set(themeName, newHex);
+    }
+  }
+
+  // Image group replacements
+  if (imageGroups && imageAnalysis) {
+    const groupReplacements = new Map();
+
+    for (const entry of colorList) {
+      if (entry.type !== 'image') continue;
+      const newHex = colorMap.get(entry.id);
+      if (!newHex || newHex === entry.hex) continue;
+
+      if (!groupReplacements.has(entry.groupIndex)) {
+        groupReplacements.set(entry.groupIndex, new Map());
+      }
+      groupReplacements.get(entry.groupIndex).set(entry.hex, newHex);
+    }
+
+    for (const [gi, replacements] of groupReplacements) {
+      const group = imageGroups[gi];
+      if (!group) continue;
+
+      imageGroupPlans.push({
+        paths: group.paths,
+        replacements,
+        getAnalysis: (path) => imageAnalysis.get(path),
+      });
+    }
+  }
+
+  return { xmlReplacements, themeReplacements, svgReplacements, imageGroupPlans };
+}
+
+/**
  * Apply color replacements to the PPTX and return a new Blob.
  */
-export async function replaceColors(originalBuffer, colorMap, themeNameToOrigHex, imageColorMap, svgColorMap) {
+export async function replaceColors(originalBuffer, plan, svgColorMap) {
   const zip = await JSZip.loadAsync(originalBuffer);
-  const { directReplacements, themeReplacements } = buildReplacementMaps(colorMap, themeNameToOrigHex);
-  const imageOnlyMap = buildTypeRestrictedMap(colorMap, imageColorMap);
-  const svgOnlyMap = buildTypeRestrictedMap(colorMap, svgColorMap);
 
-  await applyToSlideFiles(zip, directReplacements, themeReplacements);
-  await applyToThemeFiles(zip, themeReplacements);
-  await applyToImages(zip, imageOnlyMap, imageColorMap);
-  await applyToSvgs(zip, svgOnlyMap, svgColorMap);
-  await applyToSvgFallbackPngs(zip, svgOnlyMap, svgColorMap);
+  await applyToSlideFiles(zip, plan.xmlReplacements, plan.themeReplacements);
+  await applyToThemeFiles(zip, plan.themeReplacements);
+  await applyToSvgFiles(zip, plan.svgReplacements, svgColorMap);
+  await applyToSvgFallbackPngs(zip, plan);
+  await applyToImageGroups(zip, plan.imageGroupPlans);
 
   return zip.generateAsync({
     type: 'blob',
@@ -25,48 +92,29 @@ export async function replaceColors(originalBuffer, colorMap, themeNameToOrigHex
 /**
  * Build a modified PPTX as ArrayBuffer for re-rendering preview.
  */
-export async function buildModifiedBuffer(originalBuffer, colorMap, themeNameToOrigHex, imageColorMap, svgColorMap) {
-  const { directReplacements, themeReplacements } = buildReplacementMaps(colorMap, themeNameToOrigHex);
-  const imageOnlyMap = buildTypeRestrictedMap(colorMap, imageColorMap);
-  const svgOnlyMap = buildTypeRestrictedMap(colorMap, svgColorMap);
-  const hasImageChanges = imageColorMap && hasActiveReplacements(imageOnlyMap, imageColorMap);
-  const hasSvgChanges = svgColorMap && hasActiveReplacements(svgOnlyMap, svgColorMap);
+export async function buildModifiedBuffer(originalBuffer, plan, svgColorMap) {
+  const hasXml = plan.xmlReplacements.size > 0 || plan.themeReplacements.size > 0;
+  const hasSvg = plan.svgReplacements.size > 0;
+  const hasImages = plan.imageGroupPlans.length > 0;
 
-  if (directReplacements.size === 0 && themeReplacements.size === 0 && !hasImageChanges && !hasSvgChanges) {
+  if (!hasXml && !hasSvg && !hasImages) {
     return originalBuffer;
   }
 
   const zip = await JSZip.loadAsync(originalBuffer);
-  await applyToSlideFiles(zip, directReplacements, themeReplacements);
-  await applyToThemeFiles(zip, themeReplacements);
-  await applyToImages(zip, imageOnlyMap, imageColorMap);
-  await applyToSvgs(zip, svgOnlyMap, svgColorMap);
-  await applyToSvgFallbackPngs(zip, svgOnlyMap, svgColorMap);
+  await applyToSlideFiles(zip, plan.xmlReplacements, plan.themeReplacements);
+  await applyToThemeFiles(zip, plan.themeReplacements);
+  await applyToSvgFiles(zip, plan.svgReplacements, svgColorMap);
+  await applyToSvgFallbackPngs(zip, plan);
+  await applyToImageGroups(zip, plan.imageGroupPlans);
 
   return zip.generateAsync({ type: 'arraybuffer' });
 }
 
-function buildReplacementMaps(colorMap, themeNameToOrigHex) {
-  const directReplacements = new Map();
-  const themeReplacements = new Map();
+// --- XML replacement (exact match) ---
 
-  for (const [origHex, newHex] of colorMap) {
-    if (origHex === newHex) continue;
-    directReplacements.set(origHex, newHex);
-  }
-
-  for (const [themeName, origHex] of themeNameToOrigHex) {
-    const newHex = colorMap.get(origHex);
-    if (newHex && newHex !== origHex) {
-      themeReplacements.set(themeName, newHex);
-    }
-  }
-
-  return { directReplacements, themeReplacements };
-}
-
-async function applyToSlideFiles(zip, directReplacements, themeReplacements) {
-  if (directReplacements.size === 0 && themeReplacements.size === 0) return;
+async function applyToSlideFiles(zip, xmlReplacements, themeReplacements) {
+  if (xmlReplacements.size === 0 && themeReplacements.size === 0) return;
 
   const slideFiles = zip.file(/ppt\/(slides|slideLayouts|slideMasters)\/[^/]+\.xml$/);
 
@@ -74,8 +122,8 @@ async function applyToSlideFiles(zip, directReplacements, themeReplacements) {
     let xml = await file.async('string');
     let modified = false;
 
-    if (directReplacements.size > 0) {
-      const replaced = replaceDirectColors(xml, directReplacements);
+    if (xmlReplacements.size > 0) {
+      const replaced = replaceDirectColors(xml, xmlReplacements);
       if (replaced !== xml) { xml = replaced; modified = true; }
     }
 
@@ -111,20 +159,14 @@ function replaceDirectColors(xml, replacements) {
   return xml;
 }
 
-/**
- * Replace schemeClr references with srgbClr, preserving child modifier
- * elements (alpha, tint, shade, satMod, lumMod, etc).
- */
 function replaceSchemeColors(xml, themeReplacements) {
   for (const [themeName, newHex] of themeReplacements) {
-    // Self-closing: <a:schemeClr val="accent6"/>
     const selfClosing = new RegExp(
       `<a:schemeClr\\s+val="${themeName}"\\s*/>`,
       'g'
     );
     xml = xml.replace(selfClosing, `<a:srgbClr val="${newHex}"/>`);
 
-    // With children: preserve child modifier elements
     const withChildren = new RegExp(
       `<a:schemeClr\\s+val="${themeName}"\\s*>(.*?)</a:schemeClr>`,
       'gs'
@@ -161,174 +203,38 @@ function replaceThemeDefinitions(xml, themeReplacements) {
   return new XMLSerializer().serializeToString(doc);
 }
 
-function hexColorDistance(hex1, hex2) {
-  const r1 = parseInt(hex1.substring(0, 2), 16);
-  const g1 = parseInt(hex1.substring(2, 4), 16);
-  const b1 = parseInt(hex1.substring(4, 6), 16);
-  const r2 = parseInt(hex2.substring(0, 2), 16);
-  const g2 = parseInt(hex2.substring(2, 4), 16);
-  const b2 = parseInt(hex2.substring(4, 6), 16);
-  return Math.sqrt((r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2);
-}
+// --- SVG replacement (exact hex match in SVG file content) ---
 
-const IMAGE_COLOR_MATCH_THRESHOLD = 45;
-
-/**
- * Build a colorMap restricted to only colors that were extracted from a
- * specific media type (imageColorMap or svgColorMap). This prevents SVG
- * color changes from bleeding into raster image recoloring and vice versa.
- */
-function buildTypeRestrictedMap(colorMap, mediaColorMap) {
-  if (!mediaColorMap || mediaColorMap.size === 0) return new Map();
-
-  const mediaHexes = new Set();
-  for (const [, colors] of mediaColorMap) {
-    for (const c of colors) mediaHexes.add(c.hex);
-  }
-
-  const restricted = new Map();
-  for (const [origHex, newHex] of colorMap) {
-    if (origHex === newHex) continue;
-    if (mediaHexes.has(origHex)) {
-      restricted.set(origHex, newHex);
-      continue;
-    }
-    for (const mHex of mediaHexes) {
-      if (hexColorDistance(origHex, mHex) < IMAGE_COLOR_MATCH_THRESHOLD) {
-        restricted.set(origHex, newHex);
-        break;
-      }
-    }
-  }
-  return restricted;
-}
-
-function findClosestChangedColor(rawHex, colorMap) {
-  const exact = colorMap.get(rawHex);
-  if (exact && exact !== rawHex) return exact;
-
-  let bestTarget = null;
-  let bestDist = IMAGE_COLOR_MATCH_THRESHOLD;
-  for (const [origHex, newHex] of colorMap) {
-    if (origHex === newHex) continue;
-    const dist = hexColorDistance(rawHex, origHex);
-    if (dist < bestDist) {
-      bestDist = dist;
-      bestTarget = newHex;
-    }
-  }
-  return bestTarget;
-}
-
-function hasActiveReplacements(restrictedMap, mediaColorMap) {
-  if (!mediaColorMap) return false;
-  for (const [, colors] of mediaColorMap) {
-    for (const { hex } of colors) {
-      if (findClosestChangedColor(hex, restrictedMap)) return true;
-    }
-  }
-  return false;
-}
-
-async function applyToImages(zip, colorMap, imageColorMap) {
-  if (!imageColorMap || imageColorMap.size === 0) return;
-
-  const imagesToProcess = [];
-
-  for (const [path, colors] of imageColorMap) {
-    const replacements = new Map();
-    for (const { hex } of colors) {
-      const target = findClosestChangedColor(hex, colorMap);
-      if (target) {
-        replacements.set(hex, target);
-      }
-    }
-    if (replacements.size > 0) {
-      imagesToProcess.push({ path, replacements });
-    }
-  }
-
-  if (imagesToProcess.length === 0) return;
-
-  for (const { path, replacements } of imagesToProcess) {
-    const file = zip.file(path);
-    if (!file) continue;
-
-    const bytes = await file.async('uint8array');
-    const ext = path.split('.').pop().toLowerCase();
-    const mime = ext === 'png' ? 'image/png'
-      : ext === 'gif' ? 'image/gif'
-      : 'image/jpeg';
-
-    const recolored = await recolorImage(bytes, mime, replacements);
-    if (recolored) {
-      zip.file(path, recolored);
-    }
-  }
-}
-
-async function applyToSvgs(zip, svgOnlyMap, svgColorMap) {
-  if (!svgColorMap || svgColorMap.size === 0) return;
+async function applyToSvgFiles(zip, svgReplacements, svgColorMap) {
+  if (svgReplacements.size === 0 || !svgColorMap) return;
 
   for (const [path, colors] of svgColorMap) {
-    const replacements = new Map();
+    const pathReplacements = new Map();
     for (const { hex } of colors) {
-      const target = findClosestChangedColor(hex, svgOnlyMap);
-      if (target) {
-        replacements.set(hex, target);
-      }
+      const newHex = svgReplacements.get(hex);
+      if (newHex) pathReplacements.set(hex, newHex);
     }
-    if (replacements.size === 0) continue;
+    if (pathReplacements.size === 0) continue;
 
     const file = zip.file(path);
     if (!file) continue;
 
     const svgContent = await file.async('string');
-    const recolored = recolorSvg(svgContent, replacements);
+    const recolored = recolorSvg(svgContent, pathReplacements);
     if (recolored) {
       zip.file(path, recolored);
     }
   }
 }
 
-/**
- * PowerPoint stores SVGs with a PNG fallback. Many renderers (including
- * pptx-to-html and Apryse) display the PNG, not the SVG. When we recolor
- * an SVG, we also need to recolor its paired PNG fallback.
- *
- * The pairing is found in slide .rels files where a blip embeds a PNG
- * and has an asvg:svgBlip extension pointing to the SVG.
- */
-async function applyToSvgFallbackPngs(zip, svgOnlyMap, svgColorMap) {
-  if (!svgColorMap || svgColorMap.size === 0) return;
+// --- SVG fallback PNGs ---
 
-  const changedSvgPaths = new Set();
-  for (const [path, colors] of svgColorMap) {
-    for (const { hex } of colors) {
-      if (findClosestChangedColor(hex, svgOnlyMap)) {
-        changedSvgPaths.add(path);
-        break;
-      }
-    }
-  }
-  if (changedSvgPaths.size === 0) return;
+async function applyToSvgFallbackPngs(zip, plan) {
+  if (plan.svgReplacements.size === 0) return;
 
-  const svgToPngFallback = await buildSvgToPngMap(zip);
+  const svgToPng = await buildSvgToPngMap(zip);
 
-  for (const svgPath of changedSvgPaths) {
-    const pngPath = svgToPngFallback.get(svgPath);
-    if (!pngPath) continue;
-
-    const svgColors = svgColorMap.get(svgPath);
-    if (!svgColors) continue;
-
-    const replacements = new Map();
-    for (const { hex } of svgColors) {
-      const target = findClosestChangedColor(hex, svgOnlyMap);
-      if (target) replacements.set(hex, target);
-    }
-    if (replacements.size === 0) continue;
-
+  for (const [svgPath, pngPath] of svgToPng) {
     const file = zip.file(pngPath);
     if (!file) continue;
 
@@ -338,17 +244,13 @@ async function applyToSvgFallbackPngs(zip, svgOnlyMap, svgColorMap) {
       : ext === 'gif' ? 'image/gif'
       : 'image/jpeg';
 
-    const recolored = await recolorImage(bytes, mime, replacements);
+    const recolored = await recolorImage(bytes, mime, [], plan.svgReplacements);
     if (recolored) {
       zip.file(pngPath, recolored);
     }
   }
 }
 
-/**
- * Scan slide .rels files for SVG+PNG blip pairs and return a map
- * of svgPath -> pngFallbackPath.
- */
 async function buildSvgToPngMap(zip) {
   const svgToPng = new Map();
   const relsFiles = zip.file(/ppt\/slides\/_rels\/slide\d+\.xml\.rels$/);
@@ -375,10 +277,8 @@ async function buildSvgToPngMap(zip) {
     const svgBlipPattern = /r:embed="(rId\d+)"[^>]*>[\s\S]*?svgBlip[^>]*r:embed="(rId\d+)"/g;
     let m;
     while ((m = svgBlipPattern.exec(slideXml)) !== null) {
-      const pngId = m[1];
-      const svgId = m[2];
-      const pngPath = idToTarget.get(pngId);
-      const svgPath = idToTarget.get(svgId);
+      const pngPath = idToTarget.get(m[1]);
+      const svgPath = idToTarget.get(m[2]);
       if (pngPath && svgPath && !svgToPng.has(svgPath)) {
         svgToPng.set(svgPath, pngPath);
       }
@@ -386,4 +286,31 @@ async function buildSvgToPngMap(zip) {
   }
 
   return svgToPng;
+}
+
+// --- Image group replacement (palette-delta) ---
+
+async function applyToImageGroups(zip, imageGroupPlans) {
+  if (!imageGroupPlans || imageGroupPlans.length === 0) return;
+
+  for (const plan of imageGroupPlans) {
+    for (const path of plan.paths) {
+      const analysis = plan.getAnalysis(path);
+      if (!analysis) continue;
+
+      const file = zip.file(path);
+      if (!file) continue;
+
+      const bytes = await file.async('uint8array');
+      const ext = path.split('.').pop().toLowerCase();
+      const mime = ext === 'png' ? 'image/png'
+        : ext === 'gif' ? 'image/gif'
+        : 'image/jpeg';
+
+      const recolored = await recolorImage(bytes, mime, analysis.palette, plan.replacements);
+      if (recolored) {
+        zip.file(path, recolored);
+      }
+    }
+  }
 }

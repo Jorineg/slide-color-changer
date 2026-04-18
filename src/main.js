@@ -3,7 +3,7 @@ import { pptxToHtml } from '@jvmr/pptx-to-html';
 import html2canvas from 'html2canvas';
 import { extractColors, buildColorList, buildMediaSlideMap } from './colorExtractor.js';
 import { extractImageColors, extractSvgColors } from './imageColors.js';
-import { replaceColors, buildModifiedBuffer } from './colorReplacer.js';
+import { replaceColors, buildModifiedBuffer, buildReplacementPlan } from './colorReplacer.js';
 import { openColorPicker, useEyeDropper } from './colorPicker.js';
 import { loadApryseCore, isApryseLoaded, renderSlidesHD } from './apryseRenderer.js';
 
@@ -19,8 +19,8 @@ let fileName = '';
 let colorList = [];
 let colorMap = new Map();
 let themeNameToOrigHex = new Map();
-let imageColorMap = new Map();
 let imageGroups = [];
+let imageAnalysis = new Map();
 let svgColorMap = new Map();
 let mediaSlideMap = new Map();
 let directColors = new Map();
@@ -30,6 +30,7 @@ let slideCanvases = [];
 let hdMode = localStorage.getItem(HD_PREF_KEY) === 'true';
 let hdLoading = false;
 let previewDebounceTimer = null;
+let expandedGroups = new Set();
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
@@ -76,7 +77,7 @@ async function handleFile(file) {
     ({ directColors, themeColorUsage } = await extractColors(originalBuffer));
 
     showLoading('Scanning media...');
-    ({ imageColorMap, imageGroups } = await extractImageColors(originalBuffer));
+    ({ imageGroups, imageAnalysis } = await extractImageColors(originalBuffer));
     svgColorMap = await extractSvgColors(originalBuffer);
     mediaSlideMap = await buildMediaSlideMap(originalBuffer);
 
@@ -86,6 +87,7 @@ async function handleFile(file) {
     }
 
     rebuildColorList();
+    expandedGroups = new Set();
 
     currentBuffer = originalBuffer;
 
@@ -110,8 +112,9 @@ async function handleFile(file) {
     }
   } catch (err) {
     console.error('Failed to process file:', err);
-    hideLoading();
-    dropzone.classList.remove('hidden');
+    $('#loading').classList.add('hidden');
+    $('#main-content').classList.add('hidden');
+    $('#landing').classList.remove('hidden');
     showError(`Failed to process file: ${err.message}`);
   }
 }
@@ -131,15 +134,15 @@ function showError(msg) {
 
 // --- Loading ---
 function showLoading(text) {
+  $('#landing').classList.add('hidden');
   $('#loading').classList.remove('hidden');
   $('#loading-text').textContent = text;
   $('#main-content').classList.add('hidden');
-  dropzone.classList.add('hidden');
 }
 
 function hideLoading() {
   $('#loading').classList.add('hidden');
-  dropzone.classList.add('hidden');
+  $('#landing').classList.add('hidden');
   $('#main-content').classList.remove('hidden');
 }
 
@@ -155,8 +158,15 @@ function rebuildColorList() {
   const oldMap = colorMap;
   colorMap = new Map();
   for (const entry of colorList) {
-    colorMap.set(entry.hex, oldMap.get(entry.hex) || entry.hex);
+    colorMap.set(entry.id, oldMap.get(entry.id) || entry.hex);
   }
+}
+
+function getCurrentPlan() {
+  return buildReplacementPlan(
+    colorList, colorMap, themeNameToOrigHex,
+    svgColorMap, imageGroups, imageAnalysis,
+  );
 }
 
 $('#chk-include-images').addEventListener('change', () => {
@@ -173,6 +183,8 @@ function renderUI() {
   renderSlides();
 }
 
+// --- Color table with image groups ---
+
 function renderColorTable() {
   const container = $('#color-table');
   container.innerHTML = '';
@@ -185,80 +197,238 @@ function renderColorTable() {
     return;
   }
 
+  // Group image entries by groupId so we can render them as collapsible groups
+  const renderedGroups = new Set();
+
   for (const entry of visibleList) {
-    const currentHex = colorMap.get(entry.hex) || entry.hex;
-    const isModified = currentHex !== entry.hex;
+    if (entry.type === 'image') {
+      if (renderedGroups.has(entry.groupId)) continue;
+      renderedGroups.add(entry.groupId);
 
-    const row = document.createElement('div');
-    row.className = 'color-row grid grid-cols-[1.75rem_1fr_0.75rem_1.75rem_1fr] items-center gap-x-2 px-3 py-2';
-    row.dataset.colorId = entry.id;
-    row.dataset.origHex = entry.hex;
+      const groupEntries = visibleList.filter(e => e.groupId === entry.groupId);
+      renderImageGroup(container, groupEntries);
+    } else {
+      renderUnifiedRow(container, entry);
+    }
+  }
+}
 
-    row.innerHTML = `
-      <div class="color-swatch original-swatch" style="background:#${entry.hex}" title="#${entry.hex}"></div>
-      <div class="min-w-0">
-        <div class="text-[0.65rem] font-mono text-gray-400 leading-tight truncate">#${entry.hex}</div>
-        <div class="flex items-center gap-1">
-          <span class="badge ${entry.type === 'theme' ? 'badge-theme' : entry.type === 'image' ? 'badge-image' : entry.type === 'svg' ? 'badge-svg' : 'badge-direct'}">
-            ${entry.type === 'theme' ? entry.themeLabel : entry.type === 'image' ? 'Image' : entry.type === 'svg' ? 'SVG' : 'Direct'}
-          </span>
-          <span class="text-[0.6rem] text-gray-600">${entry.count}x</span>
-          ${entry.slides && entry.slides.length > 0 ? `<span class="text-[0.55rem] text-gray-500" title="Appears on slide${entry.slides.length > 1 ? 's' : ''} ${entry.slides.join(', ')}">S${entry.slides.join(',')}</span>` : ''}
-        </div>
+function renderUnifiedRow(container, entry) {
+  const currentHex = colorMap.get(entry.id) || entry.hex;
+  const isModified = currentHex !== entry.hex;
+
+  const badgeClass = entry.type === 'theme' ? 'badge-theme'
+    : entry.type === 'svg' ? 'badge-svg'
+    : 'badge-direct';
+  const badgeLabel = entry.type === 'theme' ? entry.themeLabel
+    : entry.sources?.length > 1 ? entry.sources.map(s => s === 'theme' ? entry.themeLabel : s.charAt(0).toUpperCase() + s.slice(1)).join(' + ')
+    : entry.type.charAt(0).toUpperCase() + entry.type.slice(1);
+
+  const row = document.createElement('div');
+  row.className = 'color-row grid grid-cols-[1.75rem_1fr_0.75rem_1.75rem_1fr] items-center gap-x-2 px-3 py-2';
+  row.dataset.colorId = entry.id;
+
+  row.innerHTML = `
+    <div class="color-swatch original-swatch" style="background:#${entry.hex}" title="#${entry.hex}"></div>
+    <div class="min-w-0">
+      <div class="text-[0.65rem] font-mono text-gray-400 leading-tight truncate">#${entry.hex}</div>
+      <div class="flex items-center gap-1 flex-wrap">
+        <span class="badge ${badgeClass}">${badgeLabel}</span>
+        <span class="text-[0.6rem] text-gray-600">${entry.count}x</span>
+        ${entry.slides && entry.slides.length > 0 ? `<span class="text-[0.55rem] text-gray-500" title="Slides ${entry.slides.join(', ')}">S${entry.slides.join(',')}</span>` : ''}
       </div>
-      <svg class="arrow-icon h-3 w-3 justify-self-center" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" />
-      </svg>
-      <div class="color-swatch target-swatch${isModified ? ' ring-2 ring-indigo-500' : ''}" style="background:#${currentHex}" title="#${currentHex}"></div>
-      <div class="min-w-0">
-        <div class="text-[0.65rem] font-mono text-gray-400 leading-tight truncate target-hex">#${currentHex}</div>
-        <div class="flex items-center gap-1">
-          ${isModified ? `<button class="reset-btn text-[0.6rem] text-indigo-400 hover:text-indigo-300 cursor-pointer leading-tight">Reset</button>` : ''}
-          ${'EyeDropper' in window ? `<button class="eyedropper-btn text-gray-500 hover:text-gray-300 cursor-pointer leading-tight" title="Pick from screen">
-            <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M15.042 21.672L13.684 16.6m0 0l-2.51 2.225.569-9.47 5.227 7.917-3.286-.672zM12 2.25V4.5m5.834.166l-1.591 1.591M20.25 10.5H18M7.757 14.743l-1.59 1.59M6 10.5H3.75m4.007-4.243l-1.59-1.59" />
-            </svg>
-          </button>` : ''}
-        </div>
+    </div>
+    <svg class="arrow-icon h-3 w-3 justify-self-center" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" />
+    </svg>
+    <div class="color-swatch target-swatch${isModified ? ' ring-2 ring-indigo-500' : ''}" style="background:#${currentHex}" title="#${currentHex}"></div>
+    <div class="min-w-0">
+      <div class="text-[0.65rem] font-mono text-gray-400 leading-tight truncate target-hex">#${currentHex}</div>
+      <div class="flex items-center gap-1">
+        ${isModified ? `<button class="reset-btn text-[0.6rem] text-indigo-400 hover:text-indigo-300 cursor-pointer leading-tight">Reset</button>` : ''}
+        ${renderEyedropperBtn()}
       </div>
-    `;
+    </div>
+  `;
 
-    const targetSwatch = row.querySelector('.target-swatch');
+  wireSwatchEvents(row, entry);
+  container.appendChild(row);
+}
+
+function renderImageGroup(container, groupEntries) {
+  const first = groupEntries[0];
+  const groupId = first.groupId;
+  const isExpanded = expandedGroups.has(groupId);
+  const isSingleColor = groupEntries.length === 1;
+
+  if (isSingleColor) {
+    renderImageSingleRow(container, first);
+    return;
+  }
+
+  // Multi-color: collapsible header
+  const header = document.createElement('div');
+  header.className = 'color-row image-group-header flex items-center gap-2 px-3 py-2 cursor-pointer select-none';
+  header.dataset.groupId = groupId;
+
+  const anyModified = groupEntries.some(e => (colorMap.get(e.id) || e.hex) !== e.hex);
+
+  header.innerHTML = `
+    ${first.thumbnail ? `<img src="${first.thumbnail}" class="image-group-thumb" alt="" />` : '<div class="image-group-thumb-placeholder"></div>'}
+    ${first.imageCount > 1 ? `<span class="image-group-count-badge">+${first.imageCount - 1}</span>` : ''}
+    <div class="flex items-center gap-1 flex-1 min-w-0">
+      <div class="flex gap-0.5">
+        ${groupEntries.map(e => `<div class="w-3.5 h-3.5 rounded-sm border border-white/10" style="background:#${e.hex}" title="#${e.hex}"></div>`).join('')}
+      </div>
+      <span class="badge badge-image">Image${first.imageCount > 1 ? ' group' : ''}</span>
+      <span class="text-[0.6rem] text-gray-600">${first.imageCount} img${first.imageCount > 1 ? 's' : ''}</span>
+      ${first.slides?.length > 0 ? `<span class="text-[0.55rem] text-gray-500">S${first.slides.join(',')}</span>` : ''}
+    </div>
+    ${anyModified ? '<span class="w-1.5 h-1.5 rounded-full bg-indigo-500 shrink-0"></span>' : ''}
+    <svg class="h-3.5 w-3.5 text-gray-500 shrink-0 transition-transform ${isExpanded ? 'rotate-180' : ''}" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
+    </svg>
+  `;
+
+  header.addEventListener('click', () => {
+    if (expandedGroups.has(groupId)) {
+      expandedGroups.delete(groupId);
+    } else {
+      expandedGroups.add(groupId);
+    }
+    renderColorTable();
+  });
+
+  container.appendChild(header);
+
+  if (isExpanded) {
+    for (const entry of groupEntries) {
+      renderImageSubRow(container, entry);
+    }
+  }
+}
+
+function renderImageSingleRow(container, entry) {
+  const currentHex = colorMap.get(entry.id) || entry.hex;
+  const isModified = currentHex !== entry.hex;
+
+  const row = document.createElement('div');
+  row.className = 'color-row grid grid-cols-[1.75rem_1fr_0.75rem_1.75rem_1fr] items-center gap-x-2 px-3 py-2';
+  row.dataset.colorId = entry.id;
+
+  const kindLabel = entry.kind !== 'chromatic' ? ` · ${entry.kind}` : '';
+
+  row.innerHTML = `
+    <div class="relative">
+      ${entry.thumbnail ? `<img src="${entry.thumbnail}" class="image-group-thumb" alt="" />` : `<div class="color-swatch original-swatch" style="background:#${entry.hex}" title="#${entry.hex}"></div>`}
+      ${entry.imageCount > 1 ? `<span class="image-group-count-badge text-[0.5rem]">+${entry.imageCount - 1}</span>` : ''}
+    </div>
+    <div class="min-w-0">
+      <div class="text-[0.65rem] font-mono text-gray-400 leading-tight truncate">#${entry.hex}</div>
+      <div class="flex items-center gap-1 flex-wrap">
+        <span class="badge badge-image">Image${kindLabel}</span>
+        <span class="text-[0.6rem] text-gray-600">${entry.imageCount} img${entry.imageCount > 1 ? 's' : ''}</span>
+        ${entry.slides?.length > 0 ? `<span class="text-[0.55rem] text-gray-500">S${entry.slides.join(',')}</span>` : ''}
+      </div>
+    </div>
+    <svg class="arrow-icon h-3 w-3 justify-self-center" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" />
+    </svg>
+    <div class="color-swatch target-swatch${isModified ? ' ring-2 ring-indigo-500' : ''}" style="background:#${currentHex}" title="#${currentHex}"></div>
+    <div class="min-w-0">
+      <div class="text-[0.65rem] font-mono text-gray-400 leading-tight truncate target-hex">#${currentHex}</div>
+      <div class="flex items-center gap-1">
+        ${isModified ? `<button class="reset-btn text-[0.6rem] text-indigo-400 hover:text-indigo-300 cursor-pointer leading-tight">Reset</button>` : ''}
+        ${renderEyedropperBtn()}
+      </div>
+    </div>
+  `;
+
+  wireSwatchEvents(row, entry);
+  container.appendChild(row);
+}
+
+function renderImageSubRow(container, entry) {
+  const currentHex = colorMap.get(entry.id) || entry.hex;
+  const isModified = currentHex !== entry.hex;
+
+  const row = document.createElement('div');
+  row.className = 'color-row image-sub-row grid grid-cols-[1.75rem_1fr_0.75rem_1.75rem_1fr] items-center gap-x-2 px-3 py-1.5 ml-4 border-l-2 border-gray-800';
+  row.dataset.colorId = entry.id;
+
+  const kindLabel = entry.kind !== 'chromatic' ? ` · ${entry.kind}` : '';
+
+  row.innerHTML = `
+    <div class="color-swatch original-swatch !w-5 !h-5" style="background:#${entry.hex}" title="#${entry.hex}"></div>
+    <div class="min-w-0">
+      <div class="text-[0.6rem] font-mono text-gray-400 leading-tight truncate">#${entry.hex}${kindLabel}</div>
+    </div>
+    <svg class="arrow-icon h-3 w-3 justify-self-center" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" />
+    </svg>
+    <div class="color-swatch target-swatch !w-5 !h-5${isModified ? ' ring-2 ring-indigo-500' : ''}" style="background:#${currentHex}" title="#${currentHex}"></div>
+    <div class="min-w-0">
+      <div class="text-[0.6rem] font-mono text-gray-400 leading-tight truncate target-hex">#${currentHex}</div>
+      <div class="flex items-center gap-1">
+        ${isModified ? `<button class="reset-btn text-[0.6rem] text-indigo-400 hover:text-indigo-300 cursor-pointer leading-tight">Reset</button>` : ''}
+        ${renderEyedropperBtn()}
+      </div>
+    </div>
+  `;
+
+  wireSwatchEvents(row, entry);
+  container.appendChild(row);
+}
+
+function renderEyedropperBtn() {
+  if (!('EyeDropper' in window)) return '';
+  return `<button class="eyedropper-btn text-gray-500 hover:text-gray-300 cursor-pointer leading-tight" title="Pick from screen">
+    <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M15.042 21.672L13.684 16.6m0 0l-2.51 2.225.569-9.47 5.227 7.917-3.286-.672zM12 2.25V4.5m5.834.166l-1.591 1.591M20.25 10.5H18M7.757 14.743l-1.59 1.59M6 10.5H3.75m4.007-4.243l-1.59-1.59" />
+    </svg>
+  </button>`;
+}
+
+function wireSwatchEvents(row, entry) {
+  const currentHex = colorMap.get(entry.id) || entry.hex;
+
+  const targetSwatch = row.querySelector('.target-swatch');
+  if (targetSwatch) {
     targetSwatch.addEventListener('click', (e) => {
       e.stopPropagation();
       openColorPicker(targetSwatch, currentHex, (newHex) => {
-        colorMap.set(entry.hex, newHex);
+        colorMap.set(entry.id, newHex);
         renderColorTable();
         schedulePreviewUpdate();
       });
     });
+  }
 
-    const resetBtn = row.querySelector('.reset-btn');
-    if (resetBtn) {
-      resetBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        colorMap.set(entry.hex, entry.hex);
+  const resetBtn = row.querySelector('.reset-btn');
+  if (resetBtn) {
+    resetBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      colorMap.set(entry.id, entry.hex);
+      renderColorTable();
+      schedulePreviewUpdate();
+    });
+  }
+
+  const eyedropperBtn = row.querySelector('.eyedropper-btn');
+  if (eyedropperBtn) {
+    eyedropperBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const hex = await useEyeDropper();
+      if (hex) {
+        colorMap.set(entry.id, hex);
         renderColorTable();
         schedulePreviewUpdate();
-      });
-    }
-
-    const eyedropperBtn = row.querySelector('.eyedropper-btn');
-    if (eyedropperBtn) {
-      eyedropperBtn.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        const hex = await useEyeDropper();
-        if (hex) {
-          colorMap.set(entry.hex, hex);
-          renderColorTable();
-          schedulePreviewUpdate();
-        }
-      });
-    }
-
-    container.appendChild(row);
+      }
+    });
   }
 }
+
+// --- Slide rendering ---
 
 const SLIDE_FONTS_CSS = `@import url('https://fonts.googleapis.com/css2?family=Carlito:ital,wght@0,400;0,700;1,400;1,700&family=Caladea:ital,wght@0,400;0,700;1,400;1,700&family=Lato:ital,wght@0,400;0,700;1,400;1,700&display=swap');`;
 
@@ -424,7 +594,7 @@ function highlightColorRow(clickedHex) {
   let bestDistance = Infinity;
 
   for (const entry of colorList) {
-    const currentHex = colorMap.get(entry.hex) || entry.hex;
+    const currentHex = colorMap.get(entry.id) || entry.hex;
     const distOrig = colorDistance(clickedHex, entry.hex);
     const distCurrent = colorDistance(clickedHex, currentHex);
     const dist = Math.min(distOrig, distCurrent);
@@ -595,7 +765,8 @@ function schedulePreviewUpdate() {
 
 async function updateModifiedPreview() {
   try {
-    const modifiedBuffer = await buildModifiedBuffer(originalBuffer, colorMap, themeNameToOrigHex, imageColorMap, svgColorMap);
+    const plan = getCurrentPlan();
+    const modifiedBuffer = await buildModifiedBuffer(originalBuffer, plan, svgColorMap);
     currentBuffer = modifiedBuffer;
 
     if (hdMode) {
@@ -624,7 +795,8 @@ $('#btn-download').addEventListener('click', async () => {
   btn.innerHTML = '<span class="animate-pulse">Building...</span>';
 
   try {
-    const blob = await replaceColors(originalBuffer, colorMap, themeNameToOrigHex, imageColorMap, svgColorMap);
+    const plan = getCurrentPlan();
+    const blob = await replaceColors(originalBuffer, plan, svgColorMap);
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -645,7 +817,7 @@ $('#btn-download').addEventListener('click', async () => {
 // --- Reset all ---
 $('#btn-reset-all').addEventListener('click', () => {
   for (const entry of colorList) {
-    colorMap.set(entry.hex, entry.hex);
+    colorMap.set(entry.id, entry.hex);
   }
   renderColorTable();
   schedulePreviewUpdate();
