@@ -7,11 +7,14 @@ import { recolorImage, recolorSvg } from './imageColors.js';
 export async function replaceColors(originalBuffer, colorMap, themeNameToOrigHex, imageColorMap, svgColorMap) {
   const zip = await JSZip.loadAsync(originalBuffer);
   const { directReplacements, themeReplacements } = buildReplacementMaps(colorMap, themeNameToOrigHex);
+  const imageOnlyMap = buildTypeRestrictedMap(colorMap, imageColorMap);
+  const svgOnlyMap = buildTypeRestrictedMap(colorMap, svgColorMap);
 
   await applyToSlideFiles(zip, directReplacements, themeReplacements);
   await applyToThemeFiles(zip, themeReplacements);
-  await applyToImages(zip, colorMap, imageColorMap);
-  await applyToSvgs(zip, colorMap, svgColorMap);
+  await applyToImages(zip, imageOnlyMap, imageColorMap);
+  await applyToSvgs(zip, svgOnlyMap, svgColorMap);
+  await applyToSvgFallbackPngs(zip, svgOnlyMap, svgColorMap);
 
   return zip.generateAsync({
     type: 'blob',
@@ -24,8 +27,10 @@ export async function replaceColors(originalBuffer, colorMap, themeNameToOrigHex
  */
 export async function buildModifiedBuffer(originalBuffer, colorMap, themeNameToOrigHex, imageColorMap, svgColorMap) {
   const { directReplacements, themeReplacements } = buildReplacementMaps(colorMap, themeNameToOrigHex);
-  const hasImageChanges = imageColorMap && hasActiveImageReplacements(colorMap, imageColorMap);
-  const hasSvgChanges = svgColorMap && hasActiveSvgReplacements(colorMap, svgColorMap);
+  const imageOnlyMap = buildTypeRestrictedMap(colorMap, imageColorMap);
+  const svgOnlyMap = buildTypeRestrictedMap(colorMap, svgColorMap);
+  const hasImageChanges = imageColorMap && hasActiveReplacements(imageOnlyMap, imageColorMap);
+  const hasSvgChanges = svgColorMap && hasActiveReplacements(svgOnlyMap, svgColorMap);
 
   if (directReplacements.size === 0 && themeReplacements.size === 0 && !hasImageChanges && !hasSvgChanges) {
     return originalBuffer;
@@ -34,8 +39,9 @@ export async function buildModifiedBuffer(originalBuffer, colorMap, themeNameToO
   const zip = await JSZip.loadAsync(originalBuffer);
   await applyToSlideFiles(zip, directReplacements, themeReplacements);
   await applyToThemeFiles(zip, themeReplacements);
-  await applyToImages(zip, colorMap, imageColorMap);
-  await applyToSvgs(zip, colorMap, svgColorMap);
+  await applyToImages(zip, imageOnlyMap, imageColorMap);
+  await applyToSvgs(zip, svgOnlyMap, svgColorMap);
+  await applyToSvgFallbackPngs(zip, svgOnlyMap, svgColorMap);
 
   return zip.generateAsync({ type: 'arraybuffer' });
 }
@@ -167,6 +173,36 @@ function hexColorDistance(hex1, hex2) {
 
 const IMAGE_COLOR_MATCH_THRESHOLD = 45;
 
+/**
+ * Build a colorMap restricted to only colors that were extracted from a
+ * specific media type (imageColorMap or svgColorMap). This prevents SVG
+ * color changes from bleeding into raster image recoloring and vice versa.
+ */
+function buildTypeRestrictedMap(colorMap, mediaColorMap) {
+  if (!mediaColorMap || mediaColorMap.size === 0) return new Map();
+
+  const mediaHexes = new Set();
+  for (const [, colors] of mediaColorMap) {
+    for (const c of colors) mediaHexes.add(c.hex);
+  }
+
+  const restricted = new Map();
+  for (const [origHex, newHex] of colorMap) {
+    if (origHex === newHex) continue;
+    if (mediaHexes.has(origHex)) {
+      restricted.set(origHex, newHex);
+      continue;
+    }
+    for (const mHex of mediaHexes) {
+      if (hexColorDistance(origHex, mHex) < IMAGE_COLOR_MATCH_THRESHOLD) {
+        restricted.set(origHex, newHex);
+        break;
+      }
+    }
+  }
+  return restricted;
+}
+
 function findClosestChangedColor(rawHex, colorMap) {
   const exact = colorMap.get(rawHex);
   if (exact && exact !== rawHex) return exact;
@@ -184,11 +220,11 @@ function findClosestChangedColor(rawHex, colorMap) {
   return bestTarget;
 }
 
-function hasActiveImageReplacements(colorMap, imageColorMap) {
-  if (!imageColorMap) return false;
-  for (const [, colors] of imageColorMap) {
+function hasActiveReplacements(restrictedMap, mediaColorMap) {
+  if (!mediaColorMap) return false;
+  for (const [, colors] of mediaColorMap) {
     for (const { hex } of colors) {
-      if (findClosestChangedColor(hex, colorMap)) return true;
+      if (findClosestChangedColor(hex, restrictedMap)) return true;
     }
   }
   return false;
@@ -231,23 +267,13 @@ async function applyToImages(zip, colorMap, imageColorMap) {
   }
 }
 
-function hasActiveSvgReplacements(colorMap, svgColorMap) {
-  if (!svgColorMap) return false;
-  for (const [, colors] of svgColorMap) {
-    for (const { hex } of colors) {
-      if (findClosestChangedColor(hex, colorMap)) return true;
-    }
-  }
-  return false;
-}
-
-async function applyToSvgs(zip, colorMap, svgColorMap) {
+async function applyToSvgs(zip, svgOnlyMap, svgColorMap) {
   if (!svgColorMap || svgColorMap.size === 0) return;
 
   for (const [path, colors] of svgColorMap) {
     const replacements = new Map();
     for (const { hex } of colors) {
-      const target = findClosestChangedColor(hex, colorMap);
+      const target = findClosestChangedColor(hex, svgOnlyMap);
       if (target) {
         replacements.set(hex, target);
       }
@@ -263,4 +289,101 @@ async function applyToSvgs(zip, colorMap, svgColorMap) {
       zip.file(path, recolored);
     }
   }
+}
+
+/**
+ * PowerPoint stores SVGs with a PNG fallback. Many renderers (including
+ * pptx-to-html and Apryse) display the PNG, not the SVG. When we recolor
+ * an SVG, we also need to recolor its paired PNG fallback.
+ *
+ * The pairing is found in slide .rels files where a blip embeds a PNG
+ * and has an asvg:svgBlip extension pointing to the SVG.
+ */
+async function applyToSvgFallbackPngs(zip, svgOnlyMap, svgColorMap) {
+  if (!svgColorMap || svgColorMap.size === 0) return;
+
+  const changedSvgPaths = new Set();
+  for (const [path, colors] of svgColorMap) {
+    for (const { hex } of colors) {
+      if (findClosestChangedColor(hex, svgOnlyMap)) {
+        changedSvgPaths.add(path);
+        break;
+      }
+    }
+  }
+  if (changedSvgPaths.size === 0) return;
+
+  const svgToPngFallback = await buildSvgToPngMap(zip);
+
+  for (const svgPath of changedSvgPaths) {
+    const pngPath = svgToPngFallback.get(svgPath);
+    if (!pngPath) continue;
+
+    const svgColors = svgColorMap.get(svgPath);
+    if (!svgColors) continue;
+
+    const replacements = new Map();
+    for (const { hex } of svgColors) {
+      const target = findClosestChangedColor(hex, svgOnlyMap);
+      if (target) replacements.set(hex, target);
+    }
+    if (replacements.size === 0) continue;
+
+    const file = zip.file(pngPath);
+    if (!file) continue;
+
+    const bytes = await file.async('uint8array');
+    const ext = pngPath.split('.').pop().toLowerCase();
+    const mime = ext === 'png' ? 'image/png'
+      : ext === 'gif' ? 'image/gif'
+      : 'image/jpeg';
+
+    const recolored = await recolorImage(bytes, mime, replacements);
+    if (recolored) {
+      zip.file(pngPath, recolored);
+    }
+  }
+}
+
+/**
+ * Scan slide .rels files for SVG+PNG blip pairs and return a map
+ * of svgPath -> pngFallbackPath.
+ */
+async function buildSvgToPngMap(zip) {
+  const svgToPng = new Map();
+  const relsFiles = zip.file(/ppt\/slides\/_rels\/slide\d+\.xml\.rels$/);
+
+  for (const relsFile of relsFiles) {
+    const xml = await relsFile.async('string');
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(xml, 'application/xml');
+
+    const idToTarget = new Map();
+    for (const rel of doc.getElementsByTagName('Relationship')) {
+      const id = rel.getAttribute('Id');
+      let target = rel.getAttribute('Target') || '';
+      if (target.startsWith('..')) target = 'ppt' + target.substring(2);
+      else if (!target.startsWith('ppt/')) target = 'ppt/slides/' + target;
+      idToTarget.set(id, target);
+    }
+
+    const slideName = relsFile.name.replace('_rels/', '').replace('.rels', '');
+    const slideFile = zip.file(slideName);
+    if (!slideFile) continue;
+
+    const slideXml = await slideFile.async('string');
+    const svgBlipPattern = /r:embed="(rId\d+)"[^>]*>[\s\S]*?svgBlip[^>]*r:embed="(rId\d+)"/g;
+    let m;
+    while ((m = svgBlipPattern.exec(slideXml)) !== null) {
+      const pngId = m[1];
+      const svgId = m[2];
+      const pngPath = idToTarget.get(pngId);
+      const svgPath = idToTarget.get(svgId);
+      if (pngPath && svgPath && !svgToPng.has(svgPath)) {
+        svgToPng.set(svgPath, pngPath);
+      }
+    }
+  }
+
+  return svgToPng;
 }
