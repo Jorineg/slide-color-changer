@@ -114,7 +114,7 @@ async function handleFile(file) {
     console.error('Failed to process file:', err);
     $('#loading').classList.add('hidden');
     $('#main-content').classList.add('hidden');
-    $('#landing').classList.remove('hidden');
+    dropzone.classList.remove('hidden');
     showError(`Failed to process file: ${err.message}`);
   }
 }
@@ -134,7 +134,7 @@ function showError(msg) {
 
 // --- Loading ---
 function showLoading(text) {
-  $('#landing').classList.add('hidden');
+  dropzone.classList.add('hidden');
   $('#loading').classList.remove('hidden');
   $('#loading-text').textContent = text;
   $('#main-content').classList.add('hidden');
@@ -142,7 +142,7 @@ function showLoading(text) {
 
 function hideLoading() {
   $('#loading').classList.add('hidden');
-  $('#landing').classList.add('hidden');
+  dropzone.classList.add('hidden');
   $('#main-content').classList.remove('hidden');
 }
 
